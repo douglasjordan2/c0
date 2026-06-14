@@ -497,6 +497,21 @@ pub async fn find_pattern(graph: &Graph, pattern: &str) -> Result<Vec<String>> {
     Ok(output)
 }
 
+/// Expand `~` and resolve a patch file path to absolute form (against the
+/// current working directory if relative). Does not require the file to exist,
+/// so it is safe to call before the file is written.
+pub fn absolutize_patch_path(f: &str) -> String {
+    let expanded = shellexpand::tilde(f).to_string();
+    let p = std::path::Path::new(&expanded);
+    if p.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p).to_string_lossy().to_string())
+            .unwrap_or(expanded)
+    }
+}
+
 pub async fn add_patch(
     graph: &Graph,
     name: &str,
@@ -508,43 +523,51 @@ pub async fn add_patch(
     url: Option<&str>,
     valid_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
+    // Absolutize the patch file path so the patch resolves from any CWD or
+    // machine. Storing a relative/tilde path in the shared graph renders the
+    // patch empty when walked from a different directory or host.
+    let abs_file = file.map(absolutize_patch_path);
+
     let mut params = vec![
         ("name", name.to_string()),
         ("namespace", namespace.to_string()),
     ];
-    let mut props = vec![
-        "name: $name".to_string(),
-        "namespace: $namespace".to_string(),
+    // MERGE on identity (name, namespace); everything else is SET so re-running
+    // updates in place instead of creating duplicate empty shells.
+    let mut sets = vec![
+        "p.invalid_at = null".to_string(),
+        "p.expired_at = null".to_string(),
     ];
 
-    if let Some(f) = file {
-        params.push(("file", f.to_string()));
-        props.push("patch_file: $file".to_string());
+    if let Some(f) = &abs_file {
+        params.push(("file", f.clone()));
+        sets.push("p.patch_file = $file".to_string());
     }
     if let Some(c) = content {
         params.push(("content", c.to_string()));
-        props.push("content: $content".to_string());
+        sets.push("p.content = $content".to_string());
     }
     if let Some(s) = source {
         params.push(("source", s.to_string()));
-        props.push("source: $source".to_string());
+        sets.push("p.source = $source".to_string());
     }
     if let Some(u) = url {
         params.push(("url", u.to_string()));
-        props.push("url: $url".to_string());
+        sets.push("p.url = $url".to_string());
     }
 
     let valid_at_str = valid_at.map_or_else(
         || "datetime()".to_string(),
         |dt| format!("datetime('{}')", dt.to_rfc3339()),
     );
+    sets.push(format!("p.valid_at = {valid_at_str}"));
 
-    props.push("created_at: datetime()".to_string());
-    props.push(format!("valid_at: {valid_at_str}"));
-    props.push("invalid_at: null".to_string());
-    props.push("expired_at: null".to_string());
-
-    let cypher = format!("CREATE (p:KnowledgePatch {{{}}})", props.join(", "));
+    let cypher = format!(
+        "MERGE (p:KnowledgePatch {{name: $name, namespace: $namespace}})
+         ON CREATE SET p.created_at = datetime()
+         SET {}",
+        sets.join(", ")
+    );
     let mut q = query(&cypher);
     for (k, v) in &params {
         q = q.param(k, v.as_str());
@@ -557,8 +580,8 @@ pub async fn add_patch(
                 query(
                     "MATCH (c:Concept {name: $concept}), (p:KnowledgePatch {name: $patch})
                  WHERE c.namespace IN $namespaces
-                 CREATE (c)-[:HAS_PATCH]->(p)
-                 CREATE (p)-[:CORRECTS]->(c)",
+                 MERGE (c)-[:HAS_PATCH]->(p)
+                 MERGE (p)-[:CORRECTS]->(c)",
                 )
                 .param("concept", concept)
                 .param("patch", name)
@@ -2193,6 +2216,58 @@ pub async fn clear_patch_file_reference(
             )
             .param("name", patch_name)
             .param("namespace", namespace),
+        )
+        .await?;
+
+    Ok(result.next().await?.is_some())
+}
+
+/// Every KnowledgePatch across all namespaces, with its file ref and whether it
+/// already has inline content. Used by `c0 backfill patch-content` to find
+/// patches that render empty (no content + missing/relative patch_file).
+pub async fn find_all_patches(graph: &Graph) -> Result<Vec<(String, String, Option<String>, bool)>> {
+    let mut result = graph
+        .execute(query(
+            "MATCH (p:KnowledgePatch)
+             RETURN p.name AS name, COALESCE(p.namespace, 'global') AS namespace,
+                    p.patch_file AS file,
+                    (p.content IS NOT NULL AND p.content <> '') AS has_content",
+        ))
+        .await?;
+
+    let mut out = Vec::new();
+    while let Some(row) = result.next().await? {
+        let name: String = row.get("name").unwrap_or_default();
+        let namespace: String = row.get("namespace").unwrap_or_default();
+        let file: Option<String> = row.get("file").unwrap_or(None);
+        let has_content: bool = row.get("has_content").unwrap_or(false);
+        out.push((name, namespace, file, has_content));
+    }
+    Ok(out)
+}
+
+/// Inline a patch's content into the graph and normalize its file ref to an
+/// absolute path, making it readable from any machine (the graph is shared but
+/// patch files are stored on individual hosts).
+pub async fn set_patch_content(
+    graph: &Graph,
+    name: &str,
+    namespace: &str,
+    content: &str,
+    abs_file: &str,
+) -> Result<bool> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (p:KnowledgePatch {name: $name})
+             WHERE COALESCE(p.namespace, 'global') = $namespace
+             SET p.content = $content, p.patch_file = $file
+             RETURN p.name AS name",
+            )
+            .param("name", name)
+            .param("namespace", namespace)
+            .param("content", content)
+            .param("file", abs_file),
         )
         .await?;
 
