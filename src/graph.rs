@@ -2225,7 +2225,9 @@ pub async fn clear_patch_file_reference(
 /// Every KnowledgePatch across all namespaces, with its file ref and whether it
 /// already has inline content. Used by `c0 backfill patch-content` to find
 /// patches that render empty (no content + missing/relative patch_file).
-pub async fn find_all_patches(graph: &Graph) -> Result<Vec<(String, String, Option<String>, bool)>> {
+pub async fn find_all_patches(
+    graph: &Graph,
+) -> Result<Vec<(String, String, Option<String>, bool)>> {
     let mut result = graph
         .execute(query(
             "MATCH (p:KnowledgePatch)

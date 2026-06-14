@@ -489,7 +489,11 @@ enum MoveCommands {
 
 /// Depth-bounded scan for `patches/` directories under `root`. Descends into
 /// `.c0` among dotdirs but skips other hidden dirs and known-heavy trees.
-fn discover_patch_dirs(root: &std::path::Path, max_depth: usize, out: &mut Vec<std::path::PathBuf>) {
+fn discover_patch_dirs(
+    root: &std::path::Path,
+    max_depth: usize,
+    out: &mut Vec<std::path::PathBuf>,
+) {
     if max_depth == 0 {
         return;
     }
@@ -506,7 +510,10 @@ fn discover_patch_dirs(root: &std::path::Path, max_depth: usize, out: &mut Vec<s
             if s.starts_with('.') && s != ".c0" {
                 continue;
             }
-            if matches!(s, "node_modules" | "target" | "cargo" | "rustup" | "go" | ".git") {
+            if matches!(
+                s,
+                "node_modules" | "target" | "cargo" | "rustup" | "go" | ".git"
+            ) {
                 continue;
             }
             if s == "patches" && !out.contains(&path) {
@@ -1196,7 +1203,9 @@ async fn main() -> Result<()> {
                         for (name, ns, path) in &report.broken_patch_refs {
                             println!("    {name} [{ns}] -> {path}");
                         }
-                        println!("  Run `c0 backfill patch-content` to inline recoverable content (non-destructive)");
+                        println!(
+                            "  Run `c0 backfill patch-content` to inline recoverable content (non-destructive)"
+                        );
                     }
 
                     if report.empty_patches.is_empty() {
@@ -1212,7 +1221,9 @@ async fn main() -> Result<()> {
                         if report.empty_patches.len() > 15 {
                             println!("    … and {} more", report.empty_patches.len() - 15);
                         }
-                        println!("  These render blank on walk. Recover via `c0 backfill patch-content`, or remove.");
+                        println!(
+                            "  These render blank on walk. Recover via `c0 backfill patch-content`, or remove."
+                        );
                     }
 
                     if report.orphaned_concepts.is_empty() {
@@ -1358,7 +1369,9 @@ async fn main() -> Result<()> {
                 valid_at,
             } => {
                 if file.is_none() && content.is_none() {
-                    eprintln!("Error: a patch needs content. Pass --file <path> or --content <text>.");
+                    eprintln!(
+                        "Error: a patch needs content. Pass --file <path> or --content <text>."
+                    );
                     eprintln!("       (a patch with neither renders empty on walk)");
                     return Ok(());
                 }
@@ -2509,7 +2522,11 @@ async fn main() -> Result<()> {
                     // 2. Otherwise gather every candidate by basename across dirs.
                     let basename = file
                         .as_ref()
-                        .and_then(|f| Path::new(f).file_name().map(|s| s.to_string_lossy().to_string()))
+                        .and_then(|f| {
+                            Path::new(f)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                        })
                         .unwrap_or_else(|| format!("{name}.md"));
                     let mut cands: Vec<PathBuf> = search_dirs
                         .iter()
@@ -2537,8 +2554,15 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let needing: Vec<_> = patches.iter().filter(|(_, _, _, has_content)| !has_content).collect();
-                println!("Patches without inline content: {} (of {} total)", needing.len(), patches.len());
+                let needing: Vec<_> = patches
+                    .iter()
+                    .filter(|(_, _, _, has_content)| !has_content)
+                    .collect();
+                println!(
+                    "Patches without inline content: {} (of {} total)",
+                    needing.len(),
+                    patches.len()
+                );
                 println!("Searching {} candidate directories\n", search_dirs.len());
 
                 let mut recovered = 0;
@@ -2551,41 +2575,67 @@ async fn main() -> Result<()> {
                                 let abs = path.to_string_lossy().to_string();
                                 if dry_run {
                                     println!("  would inline  {name} [{namespace}]  <- {abs}");
-                                } else if graph::set_patch_content(&graph_conn, name, namespace, &content, &abs).await? {
+                                } else if graph::set_patch_content(
+                                    &graph_conn,
+                                    name,
+                                    namespace,
+                                    &content,
+                                    &abs,
+                                )
+                                .await?
+                                {
                                     println!("  ✓ inlined     {name} [{namespace}]  <- {abs}");
                                     recovered += 1;
                                 }
                             }
-                            _ => unresolved.push(format!("{name} [{namespace}] (file empty/unreadable)")),
+                            _ => unresolved
+                                .push(format!("{name} [{namespace}] (file empty/unreadable)")),
                         },
                         Resolution::Ambiguous(cands) => {
                             ambiguous.push(format!(
                                 "{name} [{namespace}] -> {} candidates: {}",
                                 cands.len(),
-                                cands.iter().map(|c| c.to_string_lossy().to_string()).collect::<Vec<_>>().join(", ")
+                                cands
+                                    .iter()
+                                    .map(|c| c.to_string_lossy().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         }
-                        Resolution::NotFound => unresolved.push(format!("{name} [{namespace}] (no source file found)")),
+                        Resolution::NotFound => {
+                            unresolved.push(format!("{name} [{namespace}] (no source file found)"))
+                        }
                     }
                 }
 
                 if !ambiguous.is_empty() {
-                    println!("\nAmbiguous ({}): basename collides across namespaces, NOT inlined (fix manually) —", ambiguous.len());
+                    println!(
+                        "\nAmbiguous ({}): basename collides across namespaces, NOT inlined (fix manually) —",
+                        ambiguous.len()
+                    );
                     for a in &ambiguous {
                         println!("  ? {a}");
                     }
                 }
                 if !unresolved.is_empty() {
-                    println!("\nUnresolved ({}): content not found on this machine —", unresolved.len());
+                    println!(
+                        "\nUnresolved ({}): content not found on this machine —",
+                        unresolved.len()
+                    );
                     for u in &unresolved {
                         println!("  - {u}");
                     }
-                    println!("  (these may have their source file on another host, or it was deleted)");
+                    println!(
+                        "  (these may have their source file on another host, or it was deleted)"
+                    );
                 }
                 if dry_run {
                     println!("\n(dry run - no changes made)");
                 } else {
-                    println!("\nBackfill complete: {recovered} patches inlined, {} unresolved", unresolved.len());
+                    println!(
+                        "\nBackfill complete: {recovered} patches inlined, {} unresolved",
+                        unresolved.len()
+                    );
                 }
             }
         },
