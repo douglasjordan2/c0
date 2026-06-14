@@ -4,6 +4,7 @@
 
 ![c0 — a live knowledge graph of ~95,000 concepts, sessions, and the relationships between them](assets/brain.png)
 
+[![CI](https://github.com/douglasjordan2/c0/actions/workflows/ci.yml/badge.svg)](https://github.com/douglasjordan2/c0/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
