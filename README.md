@@ -67,9 +67,13 @@ c0 init --namespace my-project
 
 # 6. Add knowledge and recall it
 c0 add concept "reciprocal rank fusion" -d "Rank-based fusion of multiple result lists; score = weight/(k+rank)."
-c0 relate "reciprocal rank fusion" USED_BY "hybrid search"
-c0 walk "hybrid search"
+c0 add concept "hybrid search" -d "Keyword (BM25) + vector retrieval, fused by RRF." --force
+c0 relate "reciprocal rank fusion" USED_BY "hybrid search"   # both endpoints must exist
+c0 walk "reciprocal rank fusion"                             # traverses outgoing edges -> "hybrid search"
 ```
+
+> `--force` on the second concept skips the *similar-concept* guard: closely related ideas
+> often score as near-duplicates, and `relate` requires both endpoints to already exist.
 
 ## Core commands
 
@@ -101,6 +105,25 @@ c0 reads connection details from the environment, with a per-namespace `.c0/conf
 | `ANTHROPIC_API_KEY` | — | Optional; reflector classification & extraction |
 
 Embedding host/model (Ollama) default to `http://localhost:11434` and `nomic-embed-text`, and are configurable.
+
+## Using c0 with Claude Code
+
+c0 pays off most when you treat the **graph as where knowledge lives** and keep your `CLAUDE.md` for **protocol** — the instruction to consult c0, plus your own house rules. Project facts, API shapes, and architecture decisions go stale fast and bloat every prompt when hard-coded into `CLAUDE.md`; put them in the graph instead and let the model pull the relevant subgraph on demand, then *correct* it over time with patches and supersessions.
+
+The one thing `CLAUDE.md` **does** need is an instruction to actually reach for c0. A minimal version:
+
+```md
+## Memory
+
+Before answering questions about this project's stack, architecture, or APIs,
+run `c0 walk "<topic>"` first and use what it returns — it patches stale
+training knowledge. As you learn durable facts, write them back with
+`c0 add concept` / `c0 relate` so the next session inherits them.
+```
+
+Keep your preferences and conventions in `CLAUDE.md` as usual — just stop hand-maintaining *knowledge* there. For hands-off recall, wire `c0 walk` into a [Claude Code hook](https://docs.claude.com/en/docs/claude-code/hooks) so the lookup happens automatically on matching prompts.
+
+> This is a workflow suggestion, not a setup requirement — c0 is a plain CLI and works with any assistant (or none). Adopt as much of the pattern as suits you.
 
 ## Optional: Claude Code session indexing
 

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use neo4rs::{Graph, query};
 use std::collections::HashMap;
@@ -418,23 +418,40 @@ pub async fn relate(
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:KnowledgePatch {{name: $to}}) \
              WHERE a.namespace IN $namespaces AND (b.namespace IS NULL OR b.namespace IN $namespaces) \
-             CREATE (a)-[:{rel_type}]->(b)"
+             CREATE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
         )
     } else {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:Concept {{name: $to}}) \
              WHERE a.namespace IN $namespaces AND b.namespace IN $namespaces \
-             CREATE (a)-[:{rel_type}]->(b)"
+             CREATE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
         )
     };
-    graph
-        .run(
+    let mut result = graph
+        .execute(
             query(&cypher)
                 .param("from", from)
                 .param("to", to)
                 .param("namespaces", namespaces.to_vec()),
         )
         .await?;
+
+    let created = match result.next().await? {
+        Some(row) => row.get::<i64>("created").unwrap_or(0),
+        None => 0,
+    };
+    if created == 0 {
+        let target_kind = if rel_type == "HAS_PATCH" {
+            "patch"
+        } else {
+            "concept"
+        };
+        return Err(anyhow!(
+            "Could not create relationship '{from}' -[{rel_type}]-> '{to}': \
+             the source concept and/or target {target_kind} was not found in \
+             namespaces {namespaces:?}. Create both first (e.g. `c0 add concept`)."
+        ));
+    }
     Ok(())
 }
 
