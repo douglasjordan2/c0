@@ -32,26 +32,18 @@ pub async fn export_graph(
     namespace_filter: Option<&str>,
     no_embeddings: bool,
 ) -> Result<GraphExport> {
-    let ns_vec: Option<Vec<String>> = namespace_filter.map(|ns| {
-        vec![ns.to_string(), "global".to_string()]
-    });
+    let ns_vec: Option<Vec<String>> =
+        namespace_filter.map(|ns| vec![ns.to_string(), "global".to_string()]);
     let ns_slice = ns_vec.as_deref();
 
     let mut all_nodes = Vec::new();
     for label in LABELS {
-        let nodes = graph::export_nodes_by_label(
-            graph_conn,
-            label,
-            ns_slice,
-            no_embeddings,
-        ).await?;
+        let nodes =
+            graph::export_nodes_by_label(graph_conn, label, ns_slice, no_embeddings).await?;
         all_nodes.extend(nodes);
     }
 
-    let relationships = graph::export_all_relationships(
-        graph_conn,
-        ns_slice,
-    ).await?;
+    let relationships = graph::export_all_relationships(graph_conn, ns_slice).await?;
 
     let metadata = ExportMetadata {
         exported_at: chrono::Utc::now().to_rfc3339(),
@@ -81,7 +73,8 @@ fn props_to_cypher(props: &serde_json::Value) -> String {
         None => return "{}".to_string(),
     };
 
-    let parts: Vec<String> = obj.iter()
+    let parts: Vec<String> = obj
+        .iter()
         .filter(|(k, _)| k.as_str() != "embedding")
         .map(|(k, v)| {
             let val_str = match v {
@@ -100,24 +93,34 @@ fn props_to_cypher(props: &serde_json::Value) -> String {
 
 pub fn format_cypher(export: &GraphExport) -> String {
     let mut lines = Vec::new();
-    lines.push(format!("// c0 graph export - {}", export.metadata.exported_at));
-    lines.push(format!("// {} nodes, {} relationships",
-        export.metadata.node_count, export.metadata.relationship_count));
+    lines.push(format!(
+        "// c0 graph export - {}",
+        export.metadata.exported_at
+    ));
+    lines.push(format!(
+        "// {} nodes, {} relationships",
+        export.metadata.node_count, export.metadata.relationship_count
+    ));
     if let Some(ref ns) = export.metadata.namespace_filter {
         lines.push(format!("// namespace filter: {ns}"));
     }
     lines.push(String::new());
 
     for node in &export.nodes {
-        let labels = node.get("labels")
+        let labels = node
+            .get("labels")
             .and_then(|l| l.as_array())
-            .map(|arr| arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(":"))
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
             .unwrap_or_else(|| "Node".to_string());
 
-        let props = node.get("properties").cloned()
+        let props = node
+            .get("properties")
+            .cloned()
             .unwrap_or(serde_json::json!({}));
 
         lines.push(format!("CREATE (:{labels} {});", props_to_cypher(&props)));
@@ -128,17 +131,25 @@ pub fn format_cypher(export: &GraphExport) -> String {
     }
 
     for rel in &export.relationships {
-        let start = rel.get("start_name").and_then(|v| v.as_str()).unwrap_or("?");
+        let start = rel
+            .get("start_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         let end = rel.get("end_name").and_then(|v| v.as_str()).unwrap_or("?");
-        let rel_type = rel.get("rel_type").and_then(|v| v.as_str()).unwrap_or("RELATED_TO");
+        let rel_type = rel
+            .get("rel_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("RELATED_TO");
 
-        let start_label = rel.get("start_labels")
+        let start_label = rel
+            .get("start_labels")
             .and_then(|l| l.as_array())
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
             .unwrap_or("Node");
 
-        let end_label = rel.get("end_labels")
+        let end_label = rel
+            .get("end_labels")
             .and_then(|l| l.as_array())
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())

@@ -113,7 +113,11 @@ fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
     std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64)
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+        })
 }
 
 fn parse_first_prompt_from_jsonl(path: &PathBuf) -> Option<String> {
@@ -155,7 +159,9 @@ fn parse_first_prompt_from_jsonl(path: &PathBuf) -> Option<String> {
     None
 }
 
-fn parse_session_metadata_from_jsonl(path: &PathBuf) -> Option<(String, Option<String>, Option<bool>)> {
+fn parse_session_metadata_from_jsonl(
+    path: &PathBuf,
+) -> Option<(String, Option<String>, Option<bool>)> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     use std::io::BufRead;
@@ -219,10 +225,13 @@ pub async fn index_sessions() -> Result<()> {
         let namespace = derive_namespace(&dir_name);
 
         let index_path = dir_path.join("sessions-index.json");
-        let dir_state = state.dirs.entry(dir_name.clone()).or_insert_with(|| DirState {
-            index_mtime: None,
-            sessions: HashMap::new(),
-        });
+        let dir_state = state
+            .dirs
+            .entry(dir_name.clone())
+            .or_insert_with(|| DirState {
+                index_mtime: None,
+                sessions: HashMap::new(),
+            });
 
         let mut indexed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -248,10 +257,12 @@ pub async fn index_sessions() -> Result<()> {
                             continue;
                         }
 
-                        let first_prompt = entry.first_prompt.as_deref().unwrap_or("No prompt").to_string();
-                        let cwd = entry.project_path.as_deref()
-                            .unwrap_or("")
+                        let first_prompt = entry
+                            .first_prompt
+                            .as_deref()
+                            .unwrap_or("No prompt")
                             .to_string();
+                        let cwd = entry.project_path.as_deref().unwrap_or("").to_string();
 
                         let session = Session {
                             session_id: entry.session_id.clone(),
@@ -279,11 +290,7 @@ pub async fn index_sessions() -> Result<()> {
                             None
                         };
 
-                        graph::add_session(
-                            &graph_conn,
-                            &session,
-                            embedding.as_deref(),
-                        ).await?;
+                        graph::add_session(&graph_conn, &session, embedding.as_deref()).await?;
 
                         if let Some(mtime) = entry_mtime {
                             dir_state.sessions.insert(entry.session_id.clone(), mtime);
@@ -298,14 +305,13 @@ pub async fn index_sessions() -> Result<()> {
 
         let jsonl_files: Vec<_> = std::fs::read_dir(&dir_path)?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-            })
+            .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
             .collect();
 
         for jsonl_entry in &jsonl_files {
             let jsonl_path = jsonl_entry.path();
-            let session_id = jsonl_path.file_stem()
+            let session_id = jsonl_path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -325,9 +331,8 @@ pub async fn index_sessions() -> Result<()> {
             let first_prompt = parse_first_prompt_from_jsonl(&jsonl_path)
                 .unwrap_or_else(|| "No prompt".to_string());
 
-            let (cwd, git_branch, is_sidechain) =
-                parse_session_metadata_from_jsonl(&jsonl_path)
-                    .unwrap_or_else(|| (String::new(), None, None));
+            let (cwd, git_branch, is_sidechain) = parse_session_metadata_from_jsonl(&jsonl_path)
+                .unwrap_or_else(|| (String::new(), None, None));
 
             let created_at = std::fs::metadata(&jsonl_path)
                 .ok()
@@ -358,11 +363,7 @@ pub async fn index_sessions() -> Result<()> {
                 None
             };
 
-            graph::add_session(
-                &graph_conn,
-                &session,
-                embedding.as_deref(),
-            ).await?;
+            graph::add_session(&graph_conn, &session, embedding.as_deref()).await?;
 
             if let Some(mtime) = current_mtime {
                 dir_state.sessions.insert(session_id, mtime);
@@ -373,7 +374,10 @@ pub async fn index_sessions() -> Result<()> {
 
     save_state(&state)?;
 
-    println!("Indexed {indexed} sessions ({skipped} unchanged, {} dirs scanned)", entries.len());
+    println!(
+        "Indexed {indexed} sessions ({skipped} unchanged, {} dirs scanned)",
+        entries.len()
+    );
     Ok(())
 }
 
@@ -387,18 +391,26 @@ pub async fn list_sessions(namespaces: &[String], limit: usize) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<38} {:<12} {:<16} {}",
-        "SESSION ID", "NAMESPACE", "CREATED", "FIRST PROMPT");
+    println!(
+        "{:<38} {:<12} {:<16} {}",
+        "SESSION ID", "NAMESPACE", "CREATED", "FIRST PROMPT"
+    );
     println!("{}", "-".repeat(100));
 
     for s in &sessions {
-        let date = if s.created_at.len() >= 10 { &s.created_at[..10] } else { &s.created_at };
+        let date = if s.created_at.len() >= 10 {
+            &s.created_at[..10]
+        } else {
+            &s.created_at
+        };
         let prompt = if s.first_prompt.len() > 40 {
             format!("{}...", &s.first_prompt[..40])
         } else {
             s.first_prompt.clone()
         };
-        let display_name = s.summary.as_deref()
+        let display_name = s
+            .summary
+            .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or(&prompt);
         let truncated = if display_name.len() > 50 {
@@ -407,8 +419,10 @@ pub async fn list_sessions(namespaces: &[String], limit: usize) -> Result<()> {
             display_name.to_string()
         };
 
-        println!("{:<38} {:<12} {:<16} {}",
-            s.session_id, s.namespace, date, truncated);
+        println!(
+            "{:<38} {:<12} {:<16} {}",
+            s.session_id, s.namespace, date, truncated
+        );
     }
 
     println!("\n{} sessions shown", sessions.len());
@@ -426,13 +440,9 @@ pub async fn search_sessions(query: &str, namespaces: &[String], limit: usize) -
     };
 
     let graph_conn = graph::connect().await?;
-    let results = graph::search_sessions_hybrid(
-        &graph_conn,
-        query,
-        embedding.as_deref(),
-        limit,
-        namespaces,
-    ).await?;
+    let results =
+        graph::search_sessions_hybrid(&graph_conn, query, embedding.as_deref(), limit, namespaces)
+            .await?;
 
     if results.is_empty() {
         println!("No sessions found matching: \"{query}\"");
@@ -440,12 +450,16 @@ pub async fn search_sessions(query: &str, namespaces: &[String], limit: usize) -
     }
 
     println!("Sessions matching: \"{query}\"\n");
-    println!("{:<6} {:<38} {:<12} {}",
-        "SCORE", "SESSION ID", "NAMESPACE", "SUMMARY");
+    println!(
+        "{:<6} {:<38} {:<12} {}",
+        "SCORE", "SESSION ID", "NAMESPACE", "SUMMARY"
+    );
     println!("{}", "-".repeat(100));
 
     for (s, score) in &results {
-        let display = s.summary.as_deref()
+        let display = s
+            .summary
+            .as_deref()
             .filter(|v| !v.is_empty())
             .unwrap_or(&s.first_prompt);
         let truncated = if display.len() > 50 {
@@ -454,8 +468,10 @@ pub async fn search_sessions(query: &str, namespaces: &[String], limit: usize) -
             display.to_string()
         };
 
-        println!("{:<6.2} {:<38} {:<12} {}",
-            score, s.session_id, s.namespace, truncated);
+        println!(
+            "{:<6.2} {:<38} {:<12} {}",
+            score, s.session_id, s.namespace, truncated
+        );
     }
 
     println!("\n{} results", results.len());
@@ -473,16 +489,14 @@ pub async fn resume_session(query: &str, namespaces: &[String]) -> Result<()> {
     };
 
     let graph_conn = graph::connect().await?;
-    let results = graph::search_sessions_hybrid(
-        &graph_conn,
-        query,
-        embedding.as_deref(),
-        1,
-        namespaces,
-    ).await?;
+    let results =
+        graph::search_sessions_hybrid(&graph_conn, query, embedding.as_deref(), 1, namespaces)
+            .await?;
 
     if let Some((session, score)) = results.first() {
-        let display = session.summary.as_deref()
+        let display = session
+            .summary
+            .as_deref()
             .filter(|v| !v.is_empty())
             .unwrap_or(&session.first_prompt);
         let truncated = if display.len() > 80 {
@@ -649,18 +663,31 @@ fn touches_for_tool(name: &str, input: &serde_json::Value) -> Vec<FileTouch> {
         paths.push(p.to_string());
     }
 
-    paths.into_iter().map(|p| FileTouch { path: p, action: action.to_string() }).collect()
+    paths
+        .into_iter()
+        .map(|p| FileTouch {
+            path: p,
+            action: action.to_string(),
+        })
+        .collect()
 }
 
 fn bash_call_for_tool(name: &str, input: &serde_json::Value) -> Option<BashCall> {
     if name != "Bash" {
         return None;
     }
-    let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let cmd = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if cmd.is_empty() {
         return None;
     }
-    let description = input.get("description").and_then(|v| v.as_str())
+    let description = input
+        .get("description")
+        .and_then(|v| v.as_str())
         .map(std::string::ToString::to_string)
         .filter(|s| !s.is_empty());
     Some(BashCall { cmd, description })
@@ -685,7 +712,11 @@ fn extract_tool_result_text(content: &serde_json::Value) -> String {
     String::new()
 }
 
-fn parse_jsonl_file(path: &PathBuf, namespace: &str, skip_sidechains: bool) -> Result<ParsedSession> {
+fn parse_jsonl_file(
+    path: &PathBuf,
+    namespace: &str,
+    skip_sidechains: bool,
+) -> Result<ParsedSession> {
     use std::io::BufRead;
 
     let file = std::fs::File::open(path)?;
@@ -721,7 +752,9 @@ fn parse_jsonl_file(path: &PathBuf, namespace: &str, skip_sidechains: bool) -> R
         if line.is_empty() {
             continue;
         }
-        let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
 
         let line_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -763,7 +796,9 @@ fn parse_jsonl_file(path: &PathBuf, namespace: &str, skip_sidechains: bool) -> R
             }
         }
 
-        let Some(turn_id) = ext_string(&obj, "uuid") else { continue };
+        let Some(turn_id) = ext_string(&obj, "uuid") else {
+            continue;
+        };
 
         let parent_turn_id = ext_string(&obj, "parentUuid");
         let timestamp = ext_string(&obj, "timestamp").unwrap_or_default();
@@ -842,7 +877,10 @@ fn parse_jsonl_file(path: &PathBuf, namespace: &str, skip_sidechains: bool) -> R
                             continue;
                         }
                         let name = ext_string(block, "name").unwrap_or_default();
-                        let input = block.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                        let input = block
+                            .get("input")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
                         let input_json = serde_json::to_string(&input).unwrap_or_default();
                         let file_touches = touches_for_tool(&name, &input);
                         let bash = bash_call_for_tool(&name, &input);
@@ -867,7 +905,10 @@ fn parse_jsonl_file(path: &PathBuf, namespace: &str, skip_sidechains: bool) -> R
                         }
                         let is_error = ext_bool(block, "is_error").unwrap_or(false);
                         let error_text = if is_error {
-                            let raw = block.get("content").map(extract_tool_result_text).unwrap_or_default();
+                            let raw = block
+                                .get("content")
+                                .map(extract_tool_result_text)
+                                .unwrap_or_default();
                             if raw.is_empty() { None } else { Some(raw) }
                         } else {
                             None
@@ -888,7 +929,11 @@ fn parse_jsonl_file(path: &PathBuf, namespace: &str, skip_sidechains: bool) -> R
         }
 
         if !first_user_prompt_set && turn.role == "user" && !turn.text.is_empty() {
-            let snippet = if turn.text.len() > 4096 { &turn.text[..4096] } else { &turn.text };
+            let snippet = if turn.text.len() > 4096 {
+                &turn.text[..4096]
+            } else {
+                &turn.text
+            };
             parsed.first_prompt = snippet.to_string();
             first_user_prompt_set = true;
         }
@@ -989,7 +1034,8 @@ async fn write_parsed_session(
         agg.total_tool_calls += pturn.tool_use_count;
 
         for refl in &pturn.reflections {
-            let (refl_emb, n) = embed_text_opt(ollama, &refl.text, REFLECTION_EMBED_MIN_CHARS).await;
+            let (refl_emb, n) =
+                embed_text_opt(ollama, &refl.text, REFLECTION_EMBED_MIN_CHARS).await;
             stats.embed_calls += n;
             let r = Reflection {
                 reflection_id: refl.reflection_id.clone(),
@@ -1079,8 +1125,16 @@ pub async fn extract_session(
     println!(
         "  parsed {} turn(s), {} reflection(s), {} toolcall(s)",
         parsed.turns.len(),
-        parsed.turns.iter().map(|t| t.reflections.len()).sum::<usize>(),
-        parsed.turns.iter().map(|t| t.toolcalls.len()).sum::<usize>(),
+        parsed
+            .turns
+            .iter()
+            .map(|t| t.reflections.len())
+            .sum::<usize>(),
+        parsed
+            .turns
+            .iter()
+            .map(|t| t.toolcalls.len())
+            .sum::<usize>(),
     );
 
     write_parsed_session(&graph_conn, parsed, ollama.as_ref(), &mut stats).await?;
@@ -1164,7 +1218,9 @@ pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractSt
                     );
                     std::io::stdout().flush().ok();
 
-                    match write_parsed_session(&graph_conn, parsed, ollama.as_ref(), &mut stats).await {
+                    match write_parsed_session(&graph_conn, parsed, ollama.as_ref(), &mut stats)
+                        .await
+                    {
                         Ok(()) => {
                             stats.sessions_extracted += 1;
                             if let Some(m) = current_mtime {
@@ -1223,7 +1279,8 @@ pub async fn search_turns(
             embedding.as_deref(),
             limit,
             namespaces,
-        ).await?;
+        )
+        .await?;
 
         if results.is_empty() {
             println!("No reflections found matching: \"{query}\"");
@@ -1237,19 +1294,19 @@ pub async fn search_turns(
             } else {
                 r.text.clone()
             };
-            println!("[{score:.2}] {} (session {})", r.namespace, &r.session_id[..8.min(r.session_id.len())]);
+            println!(
+                "[{score:.2}] {} (session {})",
+                r.namespace,
+                &r.session_id[..8.min(r.session_id.len())]
+            );
             println!("  {snippet}");
             println!();
         }
         println!("{} result(s)", results.len());
     } else {
-        let results = graph::search_turns_hybrid(
-            &graph_conn,
-            query,
-            embedding.as_deref(),
-            limit,
-            namespaces,
-        ).await?;
+        let results =
+            graph::search_turns_hybrid(&graph_conn, query, embedding.as_deref(), limit, namespaces)
+                .await?;
 
         if results.is_empty() {
             println!("No turns found matching: \"{query}\"");
@@ -1263,7 +1320,11 @@ pub async fn search_turns(
             } else {
                 t.text.clone()
             };
-            let date = if t.timestamp.len() >= 10 { &t.timestamp[..10] } else { &t.timestamp };
+            let date = if t.timestamp.len() >= 10 {
+                &t.timestamp[..10]
+            } else {
+                &t.timestamp
+            };
             println!(
                 "[{score:.2}] {} {} {} (session {})",
                 t.role,
@@ -1309,14 +1370,18 @@ pub async fn list_session_costs(namespaces: &[String], limit: usize) -> Result<(
          LIMIT $limit"
     };
 
-    let mut result = graph_conn.execute(
-        neo4rs::query(cypher)
-        .param("namespaces", ns)
-        .param("limit", limit as i64)
-    ).await?;
+    let mut result = graph_conn
+        .execute(
+            neo4rs::query(cypher)
+                .param("namespaces", ns)
+                .param("limit", limit as i64),
+        )
+        .await?;
 
-    println!("{:<10} {:<14} {:>10} {:>10} {:>6} {}",
-        "DATE", "NAMESPACE", "IN_TOK", "OUT_TOK", "TURNS", "TITLE");
+    println!(
+        "{:<10} {:<14} {:>10} {:>10} {:>6} {}",
+        "DATE", "NAMESPACE", "IN_TOK", "OUT_TOK", "TURNS", "TITLE"
+    );
     println!("{}", "-".repeat(100));
 
     let mut total_in: i64 = 0;
@@ -1333,24 +1398,36 @@ pub async fn list_session_costs(namespaces: &[String], limit: usize) -> Result<(
         let created_at: String = row.get("created_at").unwrap_or_default();
         let summary: String = row.get("summary").unwrap_or_default();
 
-        let date = if created_at.len() >= 10 { &created_at[..10] } else { &created_at };
-        let title_src = if !summary.is_empty() { &summary } else { &first_prompt };
+        let date = if created_at.len() >= 10 {
+            &created_at[..10]
+        } else {
+            &created_at
+        };
+        let title_src = if !summary.is_empty() {
+            &summary
+        } else {
+            &first_prompt
+        };
         let title = if title_src.len() > 50 {
             format!("{}...", &title_src[..50])
         } else {
             title_src.to_string()
         };
 
-        println!("{:<10} {:<14} {:>10} {:>10} {:>6} {}",
-            date, ns, in_tok, out_tok, turns, title);
+        println!(
+            "{:<10} {:<14} {:>10} {:>10} {:>6} {}",
+            date, ns, in_tok, out_tok, turns, title
+        );
         total_in += in_tok;
         total_out += out_tok;
         count += 1;
     }
 
     println!("{}", "-".repeat(100));
-    println!("Top {count} session(s) — totals: {total_in} input + {total_out} output tokens = {} combined",
-        total_in + total_out);
+    println!(
+        "Top {count} session(s) — totals: {total_in} input + {total_out} output tokens = {} combined",
+        total_in + total_out
+    );
     Ok(())
 }
 
@@ -1401,7 +1478,9 @@ async fn extract_session_concepts_ollama(
     );
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(ENRICHMENT_OLLAMA_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(
+            ENRICHMENT_OLLAMA_TIMEOUT_SECS,
+        ))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;
 
@@ -1415,7 +1494,12 @@ async fn extract_session_concepts_ollama(
         }))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Ollama POST to {host} failed: {e:#} (source: {:?})", std::error::Error::source(&e)))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Ollama POST to {host} failed: {e:#} (source: {:?})",
+                std::error::Error::source(&e)
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1423,14 +1507,19 @@ async fn extract_session_concepts_ollama(
         anyhow::bail!("Ollama returned {status}: {body}");
     }
 
-    let parsed: OllamaGenerateResponse = resp.json().await
+    let parsed: OllamaGenerateResponse = resp
+        .json()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to parse Ollama JSON: {e:#}"))?;
     parse_ollama_concepts(&parsed.response, max_concepts)
 }
 
 fn parse_ollama_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>> {
     #[derive(serde::Deserialize)]
-    struct R { #[serde(default)] concepts: Vec<ExtractedConcept> }
+    struct R {
+        #[serde(default)]
+        concepts: Vec<ExtractedConcept>,
+    }
 
     let cleaned = raw
         .trim()
@@ -1441,23 +1530,38 @@ fn parse_ollama_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>>
     let parsed: R = serde_json::from_str(cleaned)
         .map_err(|e| anyhow::anyhow!("Failed to parse Ollama concepts: {e}\nRaw: {cleaned}"))?;
 
-    let bad = ["type", "system", "hook", "subtype", "empty", "none", "database", "api", "code", "app", "stuff", "things", "service", "domain", "generic", "term", "concept"];
+    let bad = [
+        "type", "system", "hook", "subtype", "empty", "none", "database", "api", "code", "app",
+        "stuff", "things", "service", "domain", "generic", "term", "concept",
+    ];
 
     let out: Vec<ExtractedConcept> = parsed
         .concepts
         .into_iter()
         .filter_map(|c| {
             let name = c.name.trim().to_lowercase().replace(' ', "-");
-            if name.len() < 3 || name.len() > 60 { return None; }
-            if !name.chars().all(|ch| ch.is_alphanumeric() || ch == '-') { return None; }
-            if bad.iter().any(|p| name == *p) { return None; }
+            if name.len() < 3 || name.len() > 60 {
+                return None;
+            }
+            if !name.chars().all(|ch| ch.is_alphanumeric() || ch == '-') {
+                return None;
+            }
+            if bad.iter().any(|p| name == *p) {
+                return None;
+            }
             let desc = c.description.trim().to_string();
-            if desc.is_empty() { return None; }
+            if desc.is_empty() {
+                return None;
+            }
             let description = if desc.len() > 220 {
                 let mut end = 220;
-                while !desc.is_char_boundary(end) && end > 0 { end -= 1; }
+                while !desc.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
                 format!("{}...", &desc[..end])
-            } else { desc };
+            } else {
+                desc
+            };
             Some(ExtractedConcept { name, description })
         })
         .take(max)
@@ -1485,17 +1589,14 @@ async fn extract_session_concepts(
             &model,
             text,
             max_concepts,
-        ).await;
+        )
+        .await;
     }
 
     client.extract_session_concepts(text, max_concepts).await
 }
 
-pub async fn enrich_session(
-    session_id: &str,
-    namespace: &str,
-    force: bool,
-) -> Result<EnrichStats> {
+pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
     let ollama = embeddings::OllamaClient::from_config(&semantic_config);
@@ -1503,13 +1604,15 @@ pub async fn enrich_session(
     let mut stats = EnrichStats::default();
 
     if !force {
-        let mut r = graph_conn.execute(
-            neo4rs::query(
-                "MATCH (s:Session {session_id: $id})
-                 RETURN s.enriched_at AS enriched_at, s.deep_indexed_at AS deep_at"
+        let mut r = graph_conn
+            .execute(
+                neo4rs::query(
+                    "MATCH (s:Session {session_id: $id})
+                 RETURN s.enriched_at AS enriched_at, s.deep_indexed_at AS deep_at",
+                )
+                .param("id", session_id),
             )
-            .param("id", session_id)
-        ).await?;
+            .await?;
         if let Some(row) = r.next().await? {
             let enriched: Option<String> = row.get("enriched_at").ok();
             let deep: Option<String> = row.get("deep_at").ok();
@@ -1528,7 +1631,8 @@ pub async fn enrich_session(
         session_id,
         true,
         enrichment_text_budget(),
-    ).await?;
+    )
+    .await?;
 
     if text.trim().is_empty() {
         println!("Session {session_id} has no text to enrich.");
@@ -1536,7 +1640,10 @@ pub async fn enrich_session(
         return Ok(stats);
     }
 
-    println!("Enriching session {session_id} ({} chars of text)", text.len());
+    println!(
+        "Enriching session {session_id} ({} chars of text)",
+        text.len()
+    );
 
     let concepts = match extract_session_concepts(&text, enrichment_max_concepts()).await {
         Ok(c) => c,
@@ -1551,7 +1658,10 @@ pub async fn enrich_session(
 
     for concept in &concepts {
         let embedding = if let Some(ref client) = ollama {
-            client.embed(&format!("{}: {}", concept.name, concept.description)).await.ok()
+            client
+                .embed(&format!("{}: {}", concept.name, concept.description))
+                .await
+                .ok()
         } else {
             None
         };
@@ -1565,20 +1675,19 @@ pub async fn enrich_session(
             None,
             embedding.as_deref(),
             None,
-        ).await {
+        )
+        .await
+        {
             eprintln!("  failed to add concept {}: {e}", concept.name);
             stats.errors += 1;
             continue;
         }
         stats.concepts_created += 1;
 
-        if let Err(e) = graph::link_concept_to_session(
-            &graph_conn,
-            &concept.name,
-            namespace,
-            session_id,
-            1,
-        ).await {
+        if let Err(e) =
+            graph::link_concept_to_session(&graph_conn, &concept.name, namespace, session_id, 1)
+                .await
+        {
             eprintln!("  failed to link concept {}: {e}", concept.name);
             stats.errors += 1;
             continue;
@@ -1597,29 +1706,30 @@ pub async fn enrich_session(
     Ok(stats)
 }
 
-pub async fn enrich_all(
-    namespaces: &[String],
-    limit: usize,
-    force: bool,
-) -> Result<EnrichStats> {
+pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
     let ollama = embeddings::OllamaClient::from_config(&semantic_config);
 
     let session_ids = if force {
-        let mut result = graph_conn.execute(
-            neo4rs::query(
-                "MATCH (s:Session)
+        let mut result = graph_conn
+            .execute(
+                neo4rs::query(
+                    "MATCH (s:Session)
                  WHERE s.deep_indexed_at IS NOT NULL
                    AND ($all_ns OR s.namespace IN $namespaces)
                  RETURN s.session_id AS id, s.namespace AS ns
                  ORDER BY s.deep_indexed_at DESC
-                 LIMIT $limit"
+                 LIMIT $limit",
+                )
+                .param(
+                    "namespaces",
+                    namespaces.iter().map(String::as_str).collect::<Vec<_>>(),
+                )
+                .param("all_ns", namespaces.is_empty())
+                .param("limit", limit as i64),
             )
-            .param("namespaces", namespaces.iter().map(String::as_str).collect::<Vec<_>>())
-            .param("all_ns", namespaces.is_empty())
-            .param("limit", limit as i64)
-        ).await?;
+            .await?;
         let mut out = Vec::new();
         while let Some(row) = result.next().await? {
             let id: String = row.get("id").unwrap_or_default();
@@ -1633,10 +1743,12 @@ pub async fn enrich_all(
         let ids = graph::get_unenriched_sessions(&graph_conn, namespaces, limit).await?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            let mut r = graph_conn.execute(
-                neo4rs::query("MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns")
-                    .param("id", id.as_str())
-            ).await?;
+            let mut r = graph_conn
+                .execute(
+                    neo4rs::query("MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns")
+                        .param("id", id.as_str()),
+                )
+                .await?;
             if let Some(row) = r.next().await? {
                 let ns: String = row.get("ns").unwrap_or_default();
                 out.push((id, ns));
@@ -1660,14 +1772,19 @@ pub async fn enrich_all(
             sid,
             true,
             enrichment_text_budget(),
-        ).await?;
+        )
+        .await?;
 
         if text.trim().is_empty() {
             total.sessions_skipped += 1;
             continue;
         }
 
-        print!("  [{ns}] {} ({} chars) ... ", &sid[..8.min(sid.len())], text.len());
+        print!(
+            "  [{ns}] {} ({} chars) ... ",
+            &sid[..8.min(sid.len())],
+            text.len()
+        );
         use std::io::Write;
         std::io::stdout().flush().ok();
 
@@ -1683,7 +1800,10 @@ pub async fn enrich_all(
         let mut linked = 0u32;
         for concept in &concepts {
             let embedding = if let Some(ref client) = ollama {
-                client.embed(&format!("{}: {}", concept.name, concept.description)).await.ok()
+                client
+                    .embed(&format!("{}: {}", concept.name, concept.description))
+                    .await
+                    .ok()
             } else {
                 None
             };
@@ -1696,19 +1816,17 @@ pub async fn enrich_all(
                 None,
                 embedding.as_deref(),
                 None,
-            ).await;
+            )
+            .await;
             if added.is_err() {
                 total.errors += 1;
                 continue;
             }
             total.concepts_created += 1;
-            if graph::link_concept_to_session(
-                &graph_conn,
-                &concept.name,
-                ns,
-                sid,
-                1,
-            ).await.is_ok() {
+            if graph::link_concept_to_session(&graph_conn, &concept.name, ns, sid, 1)
+                .await
+                .is_ok()
+            {
                 linked += 1;
                 total.concepts_linked += 1;
             }

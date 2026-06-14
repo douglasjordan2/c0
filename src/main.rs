@@ -15,14 +15,15 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::time::{Duration, Instant};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 fn parse_date_to_datetime(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
         return Ok(dt.with_timezone(&Utc));
     }
     if let Ok(naive_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-        let midnight = naive_date.and_hms_opt(0, 0, 0)
+        let midnight = naive_date
+            .and_hms_opt(0, 0, 0)
             .ok_or_else(|| anyhow::anyhow!("Failed to create midnight time"))?;
         return Ok(Utc.from_utc_datetime(&midnight));
     }
@@ -245,7 +246,10 @@ enum AddCommands {
 
 #[derive(Subcommand)]
 enum LinkCommands {
-    Patch { patch: String, concept: String },
+    Patch {
+        patch: String,
+        concept: String,
+    },
     Source {
         #[command(subcommand)]
         action: SourceCommands,
@@ -358,15 +362,26 @@ enum SessionCommands {
     Extract {
         #[arg(long, help = "Extract a single session by ID (default: extract all)")]
         session: Option<String>,
-        #[arg(long, help = "Re-extract even if the JSONL hasn't changed since last run")]
+        #[arg(
+            long,
+            help = "Re-extract even if the JSONL hasn't changed since last run"
+        )]
         force: bool,
         #[arg(long, help = "Skip turns from sidechain (subagent) sessions")]
         skip_sidechains: bool,
     },
     Enrich {
-        #[arg(long, help = "Enrich a single session by ID (default: enrich unenriched sessions)")]
+        #[arg(
+            long,
+            help = "Enrich a single session by ID (default: enrich unenriched sessions)"
+        )]
         session: Option<String>,
-        #[arg(long, short, default_value = "20", help = "Max sessions to enrich in this run")]
+        #[arg(
+            long,
+            short,
+            default_value = "20",
+            help = "Max sessions to enrich in this run"
+        )]
         limit: usize,
         #[arg(long, help = "Re-enrich even if already enriched")]
         force: bool,
@@ -374,7 +389,12 @@ enum SessionCommands {
         all: bool,
     },
     Cost {
-        #[arg(long, short, default_value = "20", help = "Number of top sessions to display")]
+        #[arg(
+            long,
+            short,
+            default_value = "20",
+            help = "Number of top sessions to display"
+        )]
         limit: usize,
         #[arg(long, short, help = "Show all namespaces")]
         all: bool,
@@ -503,7 +523,10 @@ fn build_enrichment_prompt(
     let related_str = if related_concepts.is_empty() {
         String::new()
     } else {
-        format!("\nRelated concepts in knowledge graph: {}", related_concepts.join(", "))
+        format!(
+            "\nRelated concepts in knowledge graph: {}",
+            related_concepts.join(", ")
+        )
     };
 
     format!(
@@ -547,10 +570,7 @@ async fn enrich_with_ollama(
     Ok(ollama_resp.response.trim().to_string())
 }
 
-async fn enrich_with_llm(
-    config: &config::SemanticConfig,
-    prompt: &str,
-) -> anyhow::Result<String> {
+async fn enrich_with_llm(config: &config::SemanticConfig, prompt: &str) -> anyhow::Result<String> {
     let client = claude::LlmClient::for_task(config, "enrichment", config.claude.timeout_secs);
 
     let response = client.generate(prompt, None).await?;
@@ -569,7 +589,8 @@ async fn enrich_trigger_description(
     namespace: &str,
     related_concepts: &[String],
 ) -> anyhow::Result<String> {
-    let prompt = build_enrichment_prompt(trigger_name, base_description, namespace, related_concepts);
+    let prompt =
+        build_enrichment_prompt(trigger_name, base_description, namespace, related_concepts);
 
     let enriched = if config.claude.provider_for("enrichment") == "ollama" {
         enrich_with_ollama(config, &prompt).await?
@@ -588,18 +609,19 @@ async fn enrich_trigger_description(
 
 fn extract_topic(prompt: &str, pattern: &str) -> String {
     if let Ok(re) = regex::Regex::new(pattern)
-        && let Some(m) = re.find(prompt) {
-            let matched = m.as_str();
-            let cleaned = matched
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { '-' })
-                .collect::<String>()
-                .trim_matches('-')
-                .to_string();
-            if !cleaned.is_empty() && cleaned.len() <= 50 {
-                return cleaned;
-            }
+        && let Some(m) = re.find(prompt)
+    {
+        let matched = m.as_str();
+        let cleaned = matched
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+        if !cleaned.is_empty() && cleaned.len() <= 50 {
+            return cleaned;
         }
+    }
 
     let simple = pattern
         .chars()
@@ -739,9 +761,16 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Init { namespace, parent, r#type } => {
+        Commands::Init {
+            namespace,
+            parent,
+            r#type,
+        } => {
             let path = config::init_namespace(&namespace, &r#type, parent.as_deref())?;
-            println!("Initialized c0 namespace '{namespace}' at {}", path.display());
+            println!(
+                "Initialized c0 namespace '{namespace}' at {}",
+                path.display()
+            );
             if let Some(ref p) = parent {
                 println!("Parent namespace: {p}");
             }
@@ -760,77 +789,94 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         #[cfg(feature = "sessions")]
-        Commands::Sessions { action } => {
-            match action {
-                None => {
-                    sessions::list_sessions(&ctx.namespaces, 20).await?;
-                    return Ok(());
-                }
-                Some(SessionCommands::Index) => {
-                    sessions::index_sessions().await?;
-                    return Ok(());
-                }
-                Some(SessionCommands::Search { query, limit, all }) => {
-                    let ns = if all { vec![] } else { ctx.namespaces.clone() };
-                    sessions::search_sessions(&query, &ns, limit).await?;
-                    return Ok(());
-                }
-                Some(SessionCommands::Resume { query, all }) => {
-                    let ns = if all { vec![] } else { ctx.namespaces.clone() };
-                    sessions::resume_session(&query, &ns).await?;
-                    return Ok(());
-                }
-                Some(SessionCommands::Extract { session, force, skip_sidechains }) => {
-                    if let Some(sid) = session {
-                        sessions::extract_session(&sid, force, skip_sidechains).await?;
-                    } else {
-                        sessions::extract_all(force, skip_sidechains).await?;
-                    }
-                    return Ok(());
-                }
-                Some(SessionCommands::Cost { limit, all }) => {
-                    let ns = if all { vec![] } else { ctx.namespaces.clone() };
-                    sessions::list_session_costs(&ns, limit).await?;
-                    return Ok(());
-                }
-                Some(SessionCommands::Enrich { session, limit, force, all }) => {
-                    let ns = if all { vec![] } else { ctx.namespaces.clone() };
-                    if let Some(sid) = session {
-                        let conn = graph::connect().await?;
-                        let mut r = conn.execute(
-                            neo4rs::query("MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns")
-                                .param("id", sid.as_str())
-                        ).await?;
-                        let session_ns: String = if let Some(row) = r.next().await? {
-                            row.get("ns").unwrap_or_else(|_| ctx.namespace.clone())
-                        } else {
-                            eprintln!("Session {sid} not found in graph. Run 'c0 sessions extract --session {sid}' first.");
-                            return Ok(());
-                        };
-                        sessions::enrich_session(&sid, &session_ns, force).await?;
-                    } else {
-                        sessions::enrich_all(&ns, limit, force).await?;
-                    }
-                    return Ok(());
-                }
+        Commands::Sessions { action } => match action {
+            None => {
+                sessions::list_sessions(&ctx.namespaces, 20).await?;
+                return Ok(());
             }
-        }
+            Some(SessionCommands::Index) => {
+                sessions::index_sessions().await?;
+                return Ok(());
+            }
+            Some(SessionCommands::Search { query, limit, all }) => {
+                let ns = if all { vec![] } else { ctx.namespaces.clone() };
+                sessions::search_sessions(&query, &ns, limit).await?;
+                return Ok(());
+            }
+            Some(SessionCommands::Resume { query, all }) => {
+                let ns = if all { vec![] } else { ctx.namespaces.clone() };
+                sessions::resume_session(&query, &ns).await?;
+                return Ok(());
+            }
+            Some(SessionCommands::Extract {
+                session,
+                force,
+                skip_sidechains,
+            }) => {
+                if let Some(sid) = session {
+                    sessions::extract_session(&sid, force, skip_sidechains).await?;
+                } else {
+                    sessions::extract_all(force, skip_sidechains).await?;
+                }
+                return Ok(());
+            }
+            Some(SessionCommands::Cost { limit, all }) => {
+                let ns = if all { vec![] } else { ctx.namespaces.clone() };
+                sessions::list_session_costs(&ns, limit).await?;
+                return Ok(());
+            }
+            Some(SessionCommands::Enrich {
+                session,
+                limit,
+                force,
+                all,
+            }) => {
+                let ns = if all { vec![] } else { ctx.namespaces.clone() };
+                if let Some(sid) = session {
+                    let conn = graph::connect().await?;
+                    let mut r = conn
+                        .execute(
+                            neo4rs::query(
+                                "MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns",
+                            )
+                            .param("id", sid.as_str()),
+                        )
+                        .await?;
+                    let session_ns: String = if let Some(row) = r.next().await? {
+                        row.get("ns").unwrap_or_else(|_| ctx.namespace.clone())
+                    } else {
+                        eprintln!(
+                            "Session {sid} not found in graph. Run 'c0 sessions extract --session {sid}' first."
+                        );
+                        return Ok(());
+                    };
+                    sessions::enrich_session(&sid, &session_ns, force).await?;
+                } else {
+                    sessions::enrich_all(&ns, limit, force).await?;
+                }
+                return Ok(());
+            }
+        },
         #[cfg(feature = "sessions")]
-        Commands::Turns { action } => {
-            match action {
-                TurnsCommands::Search { query, limit, reflections, all } => {
-                    let ns = if all { vec![] } else { ctx.namespaces.clone() };
-                    sessions::search_turns(&query, &ns, limit, reflections).await?;
-                    return Ok(());
-                }
+        Commands::Turns { action } => match action {
+            TurnsCommands::Search {
+                query,
+                limit,
+                reflections,
+                all,
+            } => {
+                let ns = if all { vec![] } else { ctx.namespaces.clone() };
+                sessions::search_turns(&query, &ns, limit, reflections).await?;
+                return Ok(());
             }
-        }
+        },
         Commands::Status => {
             println!("c0 Namespace Status");
             println!("═══════════════════════════════════════");
             println!("Active namespace: {}", ctx.namespace);
             if !ctx.parent_dirs.is_empty() {
-                let parent_names: Vec<String> = ctx.namespaces
+                let parent_names: Vec<String> = ctx
+                    .namespaces
                     .iter()
                     .skip(1)
                     .filter(|n| *n != "global")
@@ -884,17 +930,15 @@ async fn main() -> Result<()> {
                     println!("  Timeout: {}ms", sem_config.ollama_timeout_ms);
 
                     match embeddings::OllamaClient::from_config(&sem_config) {
-                        Some(client) => {
-                            match client.test_connection().await {
-                                Ok(()) => {
-                                    println!("\n✓ Connected successfully!");
-                                    println!("  Embedding dimension: 768 (nomic-embed-text)");
-                                }
-                                Err(e) => {
-                                    println!("\n✗ Connection failed: {e}");
-                                }
+                        Some(client) => match client.test_connection().await {
+                            Ok(()) => {
+                                println!("\n✓ Connected successfully!");
+                                println!("  Embedding dimension: 768 (nomic-embed-text)");
                             }
-                        }
+                            Err(e) => {
+                                println!("\n✗ Connection failed: {e}");
+                            }
+                        },
                         None => {
                             println!("\n✗ Semantic triggers disabled in config");
                         }
@@ -926,18 +970,18 @@ async fn main() -> Result<()> {
                 namespace_summary: Vec<(String, i64)>,
             }
 
-            let neo4j_ok = tokio::time::timeout(
-                Duration::from_secs(2),
-                async {
-                    match graph::connect().await {
-                        Ok(conn) => graph::ping(&conn).await.is_ok(),
-                        Err(_) => false,
-                    }
+            let neo4j_ok = tokio::time::timeout(Duration::from_secs(2), async {
+                match graph::connect().await {
+                    Ok(conn) => graph::ping(&conn).await.is_ok(),
+                    Err(_) => false,
                 }
-            ).await.unwrap_or(false);
+            })
+            .await
+            .unwrap_or(false);
 
             let sem_config = config::SemanticConfig::load();
-            let ollama_ok = if let Some(client) = embeddings::OllamaClient::from_config(&sem_config) {
+            let ollama_ok = if let Some(client) = embeddings::OllamaClient::from_config(&sem_config)
+            {
                 client.test_connection().await.is_ok()
             } else {
                 false
@@ -951,32 +995,49 @@ async fn main() -> Result<()> {
 
             if neo4j_ok {
                 if let Ok(conn) = graph::connect().await {
-                    fulltext_index_ok = graph::check_fulltext_index_exists(&conn).await.unwrap_or(false);
-                    missing_embeddings = graph::get_concepts_without_embeddings(&conn, &ctx.namespaces)
-                        .await.unwrap_or_default();
+                    fulltext_index_ok = graph::check_fulltext_index_exists(&conn)
+                        .await
+                        .unwrap_or(false);
+                    missing_embeddings =
+                        graph::get_concepts_without_embeddings(&conn, &ctx.namespaces)
+                            .await
+                            .unwrap_or_default();
 
                     let patches_with_files = graph::find_patches_with_files(&conn, &ctx.namespaces)
-                        .await.unwrap_or_default();
+                        .await
+                        .unwrap_or_default();
                     for (name, namespace, file_path) in &patches_with_files {
                         let expanded = shellexpand::tilde(file_path);
                         if !std::path::Path::new(expanded.as_ref()).exists() {
-                            broken_patch_refs.push((name.clone(), namespace.clone(), file_path.clone()));
+                            broken_patch_refs.push((
+                                name.clone(),
+                                namespace.clone(),
+                                file_path.clone(),
+                            ));
                         }
                     }
 
                     orphaned_concepts = graph::find_orphaned_concepts(&conn, &ctx.namespaces)
-                        .await.unwrap_or_default();
+                        .await
+                        .unwrap_or_default();
 
                     namespace_summary = graph::count_concepts_by_namespace(&conn)
-                        .await.unwrap_or_default();
+                        .await
+                        .unwrap_or_default();
 
                     if fix {
                         if !missing_embeddings.is_empty() {
-                            if let Some(client) = embeddings::OllamaClient::from_config(&sem_config) {
+                            if let Some(client) = embeddings::OllamaClient::from_config(&sem_config)
+                            {
                                 let mut backfilled = 0;
                                 for (name, namespace) in &missing_embeddings {
                                     if let Ok(embedding) = client.embed(name).await {
-                                        if graph::update_concept_embedding(&conn, name, namespace, &embedding).await.is_ok() {
+                                        if graph::update_concept_embedding(
+                                            &conn, name, namespace, &embedding,
+                                        )
+                                        .await
+                                        .is_ok()
+                                        {
                                             backfilled += 1;
                                         }
                                     }
@@ -984,14 +1045,19 @@ async fn main() -> Result<()> {
                                 if !json {
                                     println!("Fixed: backfilled {backfilled} embeddings");
                                 }
-                                missing_embeddings = graph::get_concepts_without_embeddings(&conn, &ctx.namespaces)
-                                    .await.unwrap_or_default();
+                                missing_embeddings =
+                                    graph::get_concepts_without_embeddings(&conn, &ctx.namespaces)
+                                        .await
+                                        .unwrap_or_default();
                             }
                         }
 
                         let mut cleared = 0;
                         for (name, namespace, _) in &broken_patch_refs {
-                            if graph::clear_patch_file_reference(&conn, name, namespace).await.unwrap_or(false) {
+                            if graph::clear_patch_file_reference(&conn, name, namespace)
+                                .await
+                                .unwrap_or(false)
+                            {
                                 cleared += 1;
                             }
                         }
@@ -1014,19 +1080,47 @@ async fn main() -> Result<()> {
             };
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
             } else {
                 println!("c0 Health Check");
                 println!("═══════════════════════════════════════");
 
                 let neo4j_icon = if report.neo4j_ok { "✓" } else { "✗" };
-                println!("{neo4j_icon} Neo4j: {}", if report.neo4j_ok { "connected" } else { "unreachable" });
+                println!(
+                    "{neo4j_icon} Neo4j: {}",
+                    if report.neo4j_ok {
+                        "connected"
+                    } else {
+                        "unreachable"
+                    }
+                );
 
                 let ollama_icon = if report.ollama_ok { "✓" } else { "✗" };
-                println!("{ollama_icon} Ollama: {}", if report.ollama_ok { "connected" } else { "unreachable" });
+                println!(
+                    "{ollama_icon} Ollama: {}",
+                    if report.ollama_ok {
+                        "connected"
+                    } else {
+                        "unreachable"
+                    }
+                );
 
-                let ft_icon = if report.fulltext_index_ok { "✓" } else { "✗" };
-                println!("{ft_icon} Fulltext index: {}", if report.fulltext_index_ok { "present" } else { "missing (run c0 migrate)" });
+                let ft_icon = if report.fulltext_index_ok {
+                    "✓"
+                } else {
+                    "✗"
+                };
+                println!(
+                    "{ft_icon} Fulltext index: {}",
+                    if report.fulltext_index_ok {
+                        "present"
+                    } else {
+                        "missing (run c0 migrate)"
+                    }
+                );
 
                 if !report.neo4j_ok {
                     println!("\nCannot run graph checks — Neo4j is not available.");
@@ -1047,7 +1141,10 @@ async fn main() -> Result<()> {
                     if report.broken_patch_refs.is_empty() {
                         println!("✓ Patch files: all references valid");
                     } else {
-                        println!("⚠ Broken patch file refs: {}", report.broken_patch_refs.len());
+                        println!(
+                            "⚠ Broken patch file refs: {}",
+                            report.broken_patch_refs.len()
+                        );
                         for (name, ns, path) in &report.broken_patch_refs {
                             println!("    {name} [{ns}] -> {path}");
                         }
@@ -1059,7 +1156,10 @@ async fn main() -> Result<()> {
                     if report.orphaned_concepts.is_empty() {
                         println!("✓ Orphaned concepts: none");
                     } else {
-                        println!("⚠ Orphaned concepts (no relationships): {}", report.orphaned_concepts.len());
+                        println!(
+                            "⚠ Orphaned concepts (no relationships): {}",
+                            report.orphaned_concepts.len()
+                        );
                         for (name, ns) in report.orphaned_concepts.iter().take(10) {
                             println!("    {name} [{ns}]");
                         }
@@ -1084,14 +1184,26 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Add { what } => match what {
-            AddCommands::Concept { name, description, source, url, force, to, valid_at } => {
+            AddCommands::Concept {
+                name,
+                description,
+                source,
+                url,
+                force,
+                to,
+                valid_at,
+            } => {
                 let target_namespace = to.as_ref().unwrap_or(&ctx.namespace);
 
                 if let Some(ref target) = to
-                    && !ctx.namespaces.contains(target) {
-                        eprintln!("Error: '{}' is not in the namespace chain {:?}", target, ctx.namespaces);
-                        return Ok(());
-                    }
+                    && !ctx.namespaces.contains(target)
+                {
+                    eprintln!(
+                        "Error: '{}' is not in the namespace chain {:?}",
+                        target, ctx.namespaces
+                    );
+                    return Ok(());
+                }
 
                 let embed_text = match &description {
                     Some(desc) => format!("{name}: {desc}"),
@@ -1099,49 +1211,52 @@ async fn main() -> Result<()> {
                 };
 
                 let semantic_config = config::SemanticConfig::load();
-                let embedding = if let Some(client) = embeddings::OllamaClient::from_config(&semantic_config) {
-                    match client.embed(&embed_text).await {
-                        Ok(emb) => {
-                            println!("Generated embedding for '{name}'");
-                            Some(emb)
+                let embedding =
+                    if let Some(client) = embeddings::OllamaClient::from_config(&semantic_config) {
+                        match client.embed(&embed_text).await {
+                            Ok(emb) => {
+                                println!("Generated embedding for '{name}'");
+                                Some(emb)
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Could not generate embedding: {e}");
+                                None
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Warning: Could not generate embedding: {e}");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
 
                 graph::ensure_concept_unique_constraint(&graph_conn).await?;
                 graph::ensure_concept_embedding_index(&graph_conn).await?;
 
-                if !force
-                    && let Some(ref emb) = embedding {
-                        let similar = graph::find_similar_concepts(
-                            &graph_conn,
-                            emb,
-                            semantic_config.default_threshold,
-                            &ctx.namespaces,
-                        ).await.unwrap_or_default();
+                if !force && let Some(ref emb) = embedding {
+                    let similar = graph::find_similar_concepts(
+                        &graph_conn,
+                        emb,
+                        semantic_config.default_threshold,
+                        &ctx.namespaces,
+                    )
+                    .await
+                    .unwrap_or_default();
 
-                        if !similar.is_empty() {
-                            println!("⚠️  Similar concepts already exist:");
-                            for (similar_name, similarity) in &similar {
-                                println!("   - {} ({:.0}% similar)", similar_name, similarity * 100.0);
-                            }
-                            println!();
-                            println!("Consider:");
-                            if let Some((best_name, _)) = similar.first() {
-                                println!("  c0 relate {name} RELATED_TO {best_name}");
-                            }
-                            println!("  c0 add concept {name} --force  # to create anyway");
-                            return Ok(());
+                    if !similar.is_empty() {
+                        println!("⚠️  Similar concepts already exist:");
+                        for (similar_name, similarity) in &similar {
+                            println!("   - {} ({:.0}% similar)", similar_name, similarity * 100.0);
                         }
+                        println!();
+                        println!("Consider:");
+                        if let Some((best_name, _)) = similar.first() {
+                            println!("  c0 relate {name} RELATED_TO {best_name}");
+                        }
+                        println!("  c0 add concept {name} --force  # to create anyway");
+                        return Ok(());
                     }
+                }
 
-                let valid_at_dt = valid_at.as_ref()
+                let valid_at_dt = valid_at
+                    .as_ref()
                     .map(|s| parse_date_to_datetime(s))
                     .transpose()?;
 
@@ -1154,7 +1269,8 @@ async fn main() -> Result<()> {
                     url.as_deref(),
                     embedding.as_deref(),
                     valid_at_dt,
-                ).await?;
+                )
+                .await?;
                 println!("Created concept: {name} [{target_namespace}]");
                 if let Some(d) = &description {
                     println!("  description: {d}");
@@ -1169,16 +1285,30 @@ async fn main() -> Result<()> {
                     println!("  valid_at: {v}");
                 }
             }
-            AddCommands::Patch { name, corrects, file, content, source, url, to, valid_at } => {
+            AddCommands::Patch {
+                name,
+                corrects,
+                file,
+                content,
+                source,
+                url,
+                to,
+                valid_at,
+            } => {
                 let target_namespace = to.as_ref().unwrap_or(&ctx.namespace);
 
                 if let Some(ref target) = to
-                    && !ctx.namespaces.contains(target) {
-                        eprintln!("Error: '{}' is not in the namespace chain {:?}", target, ctx.namespaces);
-                        return Ok(());
-                    }
+                    && !ctx.namespaces.contains(target)
+                {
+                    eprintln!(
+                        "Error: '{}' is not in the namespace chain {:?}",
+                        target, ctx.namespaces
+                    );
+                    return Ok(());
+                }
 
-                let valid_at_dt = valid_at.as_ref()
+                let valid_at_dt = valid_at
+                    .as_ref()
                     .map(|s| parse_date_to_datetime(s))
                     .transpose()?;
 
@@ -1192,7 +1322,8 @@ async fn main() -> Result<()> {
                     source.as_deref(),
                     url.as_deref(),
                     valid_at_dt,
-                ).await?;
+                )
+                .await?;
                 println!("Created patch: {name} [{target_namespace}]");
                 if let Some(c) = corrects {
                     println!("  corrects: {c}");
@@ -1215,7 +1346,14 @@ async fn main() -> Result<()> {
             graph::relate(&graph_conn, &from, &rel_type, &to, &ctx.namespaces).await?;
             println!("{from} -[{rel_type}]-> {to}");
         }
-        Commands::Walk { start, depth, context, live, as_of, include_expired } => {
+        Commands::Walk {
+            start,
+            depth,
+            context,
+            live,
+            as_of,
+            include_expired,
+        } => {
             let timer = Instant::now();
 
             let temporal = {
@@ -1241,22 +1379,48 @@ async fn main() -> Result<()> {
             }
 
             let mut concept = start.clone();
-            let mut patches = graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal).await?;
-            let mut connected = graph::traverse_temporal(&graph_conn, &concept, depth, &ctx.namespaces, &temporal).await?;
+            let mut patches =
+                graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal)
+                    .await?;
+            let mut connected =
+                graph::traverse_temporal(&graph_conn, &concept, depth, &ctx.namespaces, &temporal)
+                    .await?;
 
             if patches.is_empty() && connected.is_empty() {
-                let ft_matches = graph::search_concepts_fulltext(&graph_conn, &start, 5, &ctx.namespaces).await?;
-                let query_terms: Vec<String> = start.split_whitespace().map(|t| t.to_lowercase()).collect();
+                let ft_matches =
+                    graph::search_concepts_fulltext(&graph_conn, &start, 5, &ctx.namespaces)
+                        .await?;
+                let query_terms: Vec<String> =
+                    start.split_whitespace().map(|t| t.to_lowercase()).collect();
                 let best = ft_matches.iter().find(|r| {
                     let name_lower = r.name.to_lowercase();
-                    let matching = query_terms.iter().filter(|t| name_lower.contains(t.as_str())).count();
+                    let matching = query_terms
+                        .iter()
+                        .filter(|t| name_lower.contains(t.as_str()))
+                        .count();
                     matching > query_terms.len() / 2
                 });
                 if let Some(best) = best {
-                    println!("(fulltext: '{start}' -> '{}' [score: {:.2}])", best.name, best.similarity);
+                    println!(
+                        "(fulltext: '{start}' -> '{}' [score: {:.2}])",
+                        best.name, best.similarity
+                    );
                     concept = best.name.clone();
-                    patches = graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal).await?;
-                    connected = graph::traverse_temporal(&graph_conn, &concept, depth, &ctx.namespaces, &temporal).await?;
+                    patches = graph::get_patches_temporal(
+                        &graph_conn,
+                        &concept,
+                        &ctx.namespaces,
+                        &temporal,
+                    )
+                    .await?;
+                    connected = graph::traverse_temporal(
+                        &graph_conn,
+                        &concept,
+                        depth,
+                        &ctx.namespaces,
+                        &temporal,
+                    )
+                    .await?;
                 }
             }
 
@@ -1265,25 +1429,45 @@ async fn main() -> Result<()> {
                 if use_semantic {
                     let semantic_config = config::SemanticConfig::load();
                     if semantic_config.enabled
-                        && let Some(client) = embeddings::OllamaClient::from_config(&semantic_config)
-                            && let Ok(query_embedding) = client.embed(&start).await {
-                                let hybrid_config = graph::HybridSearchConfig::default();
-                                let similar = graph::search_hybrid_temporal(
-                                    &graph_conn,
-                                    &start,
-                                    &query_embedding,
-                                    &ctx.namespaces,
-                                    &temporal,
-                                    &hybrid_config,
-                                ).await.unwrap_or_default();
+                        && let Some(client) =
+                            embeddings::OllamaClient::from_config(&semantic_config)
+                        && let Ok(query_embedding) = client.embed(&start).await
+                    {
+                        let hybrid_config = graph::HybridSearchConfig::default();
+                        let similar = graph::search_hybrid_temporal(
+                            &graph_conn,
+                            &start,
+                            &query_embedding,
+                            &ctx.namespaces,
+                            &temporal,
+                            &hybrid_config,
+                        )
+                        .await
+                        .unwrap_or_default();
 
-                                if let Some((best_name, score)) = similar.first() {
-                                    println!("(hybrid: '{}' -> '{}' [rrf: {:.6}])", start, best_name, score);
-                                    concept = best_name.clone();
-                                    patches = graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal).await?;
-                                    connected = graph::traverse_temporal(&graph_conn, &concept, depth, &ctx.namespaces, &temporal).await?;
-                                }
-                            }
+                        if let Some((best_name, score)) = similar.first() {
+                            println!(
+                                "(hybrid: '{}' -> '{}' [rrf: {:.6}])",
+                                start, best_name, score
+                            );
+                            concept = best_name.clone();
+                            patches = graph::get_patches_temporal(
+                                &graph_conn,
+                                &concept,
+                                &ctx.namespaces,
+                                &temporal,
+                            )
+                            .await?;
+                            connected = graph::traverse_temporal(
+                                &graph_conn,
+                                &concept,
+                                depth,
+                                &ctx.namespaces,
+                                &temporal,
+                            )
+                            .await?;
+                        }
+                    }
                 }
             }
 
@@ -1321,17 +1505,21 @@ async fn main() -> Result<()> {
 
                 if semantic_config.enabled
                     && let Some(client) = embeddings::OllamaClient::from_config(&semantic_config)
-                        && let Ok(query_emb) = client.embed(&start).await {
-                            for name in &connected {
-                                if let Ok(Some(concept_emb)) = graph::get_concept_embedding(&graph_conn, name, &ctx.namespaces).await {
-                                    let sim = embeddings::cosine_similarity(&query_emb, &concept_emb);
-                                    ranked_connected.push((name.clone(), sim));
-                                } else {
-                                    ranked_connected.push((name.clone(), 0.0));
-                                }
-                            }
-                            ranked_connected.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    && let Ok(query_emb) = client.embed(&start).await
+                {
+                    for name in &connected {
+                        if let Ok(Some(concept_emb)) =
+                            graph::get_concept_embedding(&graph_conn, name, &ctx.namespaces).await
+                        {
+                            let sim = embeddings::cosine_similarity(&query_emb, &concept_emb);
+                            ranked_connected.push((name.clone(), sim));
+                        } else {
+                            ranked_connected.push((name.clone(), 0.0));
                         }
+                    }
+                    ranked_connected
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                }
 
                 if ranked_connected.is_empty() {
                     ranked_connected = connected.iter().map(|n| (n.clone(), 0.0)).collect();
@@ -1352,7 +1540,9 @@ async fn main() -> Result<()> {
                     if *score < PATCH_DISPLAY_THRESHOLD && *score > 0.0 {
                         continue;
                     }
-                    let node_patches = graph::get_patches_temporal(&graph_conn, name, &ctx.namespaces, &temporal).await?;
+                    let node_patches =
+                        graph::get_patches_temporal(&graph_conn, name, &ctx.namespaces, &temporal)
+                            .await?;
                     for patch in node_patches {
                         if *score > 0.0 {
                             println!("\n[{} PATCH ({:.0}%)]", name.to_uppercase(), score * 100.0);
@@ -1382,12 +1572,21 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let linked_sessions = graph::get_sessions_for_concept(&graph_conn, &concept, &ctx.namespaces, 5).await.unwrap_or_default();
+            let linked_sessions =
+                graph::get_sessions_for_concept(&graph_conn, &concept, &ctx.namespaces, 5)
+                    .await
+                    .unwrap_or_default();
             if !linked_sessions.is_empty() {
                 println!("\n📝 SESSIONS DISCUSSING '{concept}':");
                 for (session, count) in &linked_sessions {
-                    let date = if session.created_at.len() >= 10 { &session.created_at[..10] } else { &session.created_at };
-                    let display = session.summary.as_deref()
+                    let date = if session.created_at.len() >= 10 {
+                        &session.created_at[..10]
+                    } else {
+                        &session.created_at
+                    };
+                    let display = session
+                        .summary
+                        .as_deref()
                         .filter(|s| !s.is_empty())
                         .unwrap_or(&session.first_prompt);
                     let snippet = if display.len() > 90 {
@@ -1395,14 +1594,26 @@ async fn main() -> Result<()> {
                     } else {
                         display.to_string()
                     };
-                    let mention = if *count > 1 { format!(" ×{count}") } else { String::new() };
-                    println!("  [{}] {}{}  {}", date, &session.session_id[..8.min(session.session_id.len())], mention, snippet);
+                    let mention = if *count > 1 {
+                        format!(" ×{count}")
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  [{}] {}{}  {}",
+                        date,
+                        &session.session_id[..8.min(session.session_id.len())],
+                        mention,
+                        snippet
+                    );
                 }
                 println!("  (resume any: claude --resume <session-id>)");
             }
 
             if live {
-                let live_sources = graph::get_live_sources_for_concept(&graph_conn, &concept, &ctx.namespaces).await?;
+                let live_sources =
+                    graph::get_live_sources_for_concept(&graph_conn, &concept, &ctx.namespaces)
+                        .await?;
                 if !live_sources.is_empty() {
                     println!("\n📡 LIVE SOURCES:");
                     for source in &live_sources {
@@ -1441,8 +1652,14 @@ async fn main() -> Result<()> {
                 println!("{concept} -[HAS_PATCH]-> {patch}");
             }
             LinkCommands::Source { action } => match action {
-                SourceCommands::Add { name, url, r#type, concept } => {
-                    let source_type = r#type.unwrap_or_else(|| fetch::detect_source_type(&url).to_string());
+                SourceCommands::Add {
+                    name,
+                    url,
+                    r#type,
+                    concept,
+                } => {
+                    let source_type =
+                        r#type.unwrap_or_else(|| fetch::detect_source_type(&url).to_string());
 
                     println!("Fetching content from URL to generate embedding...");
                     let content = match fetch::fetch_url(&url, &source_type).await {
@@ -1458,7 +1675,9 @@ async fn main() -> Result<()> {
                     };
 
                     let semantic_config = config::SemanticConfig::load();
-                    let embedding = if let Some(client) = embeddings::OllamaClient::from_config(&semantic_config) {
+                    let embedding = if let Some(client) =
+                        embeddings::OllamaClient::from_config(&semantic_config)
+                    {
                         match client.embed(&content).await {
                             Ok(emb) => {
                                 println!("  ✓ Generated embedding ({} dims)", emb.len());
@@ -1483,7 +1702,8 @@ async fn main() -> Result<()> {
                         &ctx.namespace,
                         concept.as_deref(),
                         embedding.as_deref(),
-                    ).await?;
+                    )
+                    .await?;
 
                     println!("\nCreated live source: {} [{}]", name, ctx.namespace);
                     println!("  url: {url}");
@@ -1493,7 +1713,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 SourceCommands::Remove { name } => {
-                    let deleted = graph::remove_live_source(&graph_conn, &name, &ctx.namespace).await?;
+                    let deleted =
+                        graph::remove_live_source(&graph_conn, &name, &ctx.namespace).await?;
                     if deleted {
                         println!("Removed live source: {name}");
                     } else {
@@ -1504,7 +1725,11 @@ async fn main() -> Result<()> {
                     let sources = if all {
                         graph::list_live_sources(&graph_conn, &ctx.namespaces).await?
                     } else if let Some(ref n) = name {
-                        if let Some(s) = graph::get_live_source(&graph_conn, n, &ctx.namespaces).await? { vec![s] } else {
+                        if let Some(s) =
+                            graph::get_live_source(&graph_conn, n, &ctx.namespaces).await?
+                        {
+                            vec![s]
+                        } else {
                             println!("Live source not found: {n}");
                             return Ok(());
                         }
@@ -1519,10 +1744,13 @@ async fn main() -> Result<()> {
                     }
 
                     let semantic_config = config::SemanticConfig::load();
-                    let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) { c } else {
-                        eprintln!("Error: Semantic search not configured");
-                        return Ok(());
-                    };
+                    let client =
+                        if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
+                            c
+                        } else {
+                            eprintln!("Error: Semantic search not configured");
+                            return Ok(());
+                        };
 
                     println!("Refreshing {} source(s)...", sources.len());
                     for source in sources {
@@ -1537,7 +1765,8 @@ async fn main() -> Result<()> {
                                             &source.name,
                                             &source.namespace,
                                             &embedding,
-                                        ).await?;
+                                        )
+                                        .await?;
                                         println!("✓ refreshed");
                                     }
                                     Err(e) => println!("✗ embedding error: {e}"),
@@ -1548,7 +1777,11 @@ async fn main() -> Result<()> {
                     }
                 }
                 SourceCommands::Fetch { name } => {
-                    let source = if let Some(s) = graph::get_live_source(&graph_conn, &name, &ctx.namespaces).await? { s } else {
+                    let source = if let Some(s) =
+                        graph::get_live_source(&graph_conn, &name, &ctx.namespaces).await?
+                    {
+                        s
+                    } else {
                         println!("Live source not found: {name}");
                         return Ok(());
                     };
@@ -1565,12 +1798,19 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                SourceCommands::Search { query, limit, fetch: do_fetch } => {
+                SourceCommands::Search {
+                    query,
+                    limit,
+                    fetch: do_fetch,
+                } => {
                     let semantic_config = config::SemanticConfig::load();
-                    let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) { c } else {
-                        eprintln!("Error: Semantic search not configured");
-                        return Ok(());
-                    };
+                    let client =
+                        if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
+                            c
+                        } else {
+                            eprintln!("Error: Semantic search not configured");
+                            return Ok(());
+                        };
 
                     println!("Searching for: \"{query}\"");
                     let query_embedding = client.embed(&query).await?;
@@ -1581,7 +1821,8 @@ async fn main() -> Result<()> {
                         semantic_config.query_floor_threshold,
                         &ctx.namespaces,
                         limit,
-                    ).await?;
+                    )
+                    .await?;
 
                     if results.is_empty() {
                         println!("No matching sources found");
@@ -1590,11 +1831,18 @@ async fn main() -> Result<()> {
 
                     println!("\nFound {} matching source(s):", results.len());
                     for (source, similarity) in &results {
-                        let linked = source.linked_concept
+                        let linked = source
+                            .linked_concept
                             .as_ref()
                             .map(|c| format!(" -> {c}"))
                             .unwrap_or_default();
-                        println!("  [{:.0}%] {} ({}){}", similarity * 100.0, source.name, source.source_type, linked);
+                        println!(
+                            "  [{:.0}%] {} ({}){}",
+                            similarity * 100.0,
+                            source.name,
+                            source.source_type,
+                            linked
+                        );
                         println!("        {}", source.url);
                     }
 
@@ -1622,10 +1870,16 @@ async fn main() -> Result<()> {
                 if patches.is_empty() {
                     println!("No patches found");
                 } else {
-                    println!("Knowledge patches ({} namespace(s): {:?}):", ctx.namespaces.len(), ctx.namespaces);
+                    println!(
+                        "Knowledge patches ({} namespace(s): {:?}):",
+                        ctx.namespaces.len(),
+                        ctx.namespaces
+                    );
                     for (name, file, corrects, namespace) in patches {
-                        let loc = file.map_or_else(|| "inline".to_string(), |f| format!("file: {f}"));
-                        let corr = corrects.map(|c| format!(" -> corrects: {c}"))
+                        let loc =
+                            file.map_or_else(|| "inline".to_string(), |f| format!("file: {f}"));
+                        let corr = corrects
+                            .map(|c| format!(" -> corrects: {c}"))
                             .unwrap_or_default();
                         let ns = if namespace == "global" {
                             String::new()
@@ -1638,13 +1892,15 @@ async fn main() -> Result<()> {
             }
             ListCommands::Triggers { semantic } => {
                 if semantic {
-                    let triggers = graph::list_semantic_triggers(&graph_conn, &ctx.namespaces).await?;
+                    let triggers =
+                        graph::list_semantic_triggers(&graph_conn, &ctx.namespaces).await?;
                     if triggers.is_empty() {
                         println!("No semantic triggers configured");
                     } else {
                         println!("Semantic triggers ({}):", triggers.len());
                         for t in triggers {
-                            let threshold_str = t.threshold
+                            let threshold_str = t
+                                .threshold
                                 .map(|th| format!(" (threshold: {th:.2})"))
                                 .unwrap_or_default();
                             let ns = if t.namespace == "global" {
@@ -1682,23 +1938,37 @@ async fn main() -> Result<()> {
                         } else {
                             format!(" [{}]", s.namespace)
                         };
-                        let linked = s.linked_concept
+                        let linked = s
+                            .linked_concept
                             .map(|c| format!(" -> {c}"))
                             .unwrap_or_default();
-                        let indexed = s.last_indexed.map_or_else(|| " (not indexed)".to_string(), |t| format!(" (indexed: {t})"));
-                        println!("  {}{} ({}){}{}",
-                            s.name, ns, s.source_type, linked, indexed);
+                        let indexed = s.last_indexed.map_or_else(
+                            || " (not indexed)".to_string(),
+                            |t| format!(" (indexed: {t})"),
+                        );
+                        println!(
+                            "  {}{} ({}){}{}",
+                            s.name, ns, s.source_type, linked, indexed
+                        );
                         println!("    {}", s.url);
                     }
                 }
             }
         },
         Commands::Trigger { action } => match action {
-            TriggerCommands::Add { pattern, semantic, description, threshold, no_enrich } => {
+            TriggerCommands::Add {
+                pattern,
+                semantic,
+                description,
+                threshold,
+                no_enrich,
+            } => {
                 if semantic {
                     let sem_config = config::SemanticConfig::load();
-                    let client = embeddings::OllamaClient::from_config(&sem_config)
-                        .ok_or_else(|| anyhow::anyhow!("Semantic triggers not enabled in config"))?;
+                    let client =
+                        embeddings::OllamaClient::from_config(&sem_config).ok_or_else(|| {
+                            anyhow::anyhow!("Semantic triggers not enabled in config")
+                        })?;
 
                     let base_desc = description.unwrap_or_else(|| pattern.clone());
 
@@ -1706,14 +1976,20 @@ async fn main() -> Result<()> {
                         base_desc
                     } else {
                         println!("Enriching description with LLM...");
-                        let related = graph::get_related_concept_names(&graph_conn, &pattern, &ctx.namespaces).await?;
+                        let related = graph::get_related_concept_names(
+                            &graph_conn,
+                            &pattern,
+                            &ctx.namespaces,
+                        )
+                        .await?;
                         let enriched = enrich_trigger_description(
                             &sem_config,
                             &pattern,
                             &base_desc,
                             &ctx.namespace,
                             &related,
-                        ).await?;
+                        )
+                        .await?;
                         println!("  Base: {base_desc}");
                         println!("  Enriched: {enriched}");
                         enriched
@@ -1730,7 +2006,8 @@ async fn main() -> Result<()> {
                         &embedding,
                         &ctx.namespace,
                         threshold,
-                    ).await?;
+                    )
+                    .await?;
 
                     println!("Added semantic trigger: {} [{}]", pattern, ctx.namespace);
                     println!("  Description: {desc}");
@@ -1751,7 +2028,9 @@ async fn main() -> Result<()> {
             }
             TriggerCommands::Remove { pattern, semantic } => {
                 if semantic {
-                    let deleted = graph::remove_semantic_trigger(&graph_conn, &pattern, &ctx.namespace).await?;
+                    let deleted =
+                        graph::remove_semantic_trigger(&graph_conn, &pattern, &ctx.namespace)
+                            .await?;
                     if deleted {
                         println!("Removed semantic trigger: {pattern}");
                     } else {
@@ -1799,31 +2078,33 @@ async fn main() -> Result<()> {
                 let sem_config = config::SemanticConfig::load();
                 if sem_config.enabled {
                     match embeddings::OllamaClient::from_config(&sem_config) {
-                        Some(client) => {
-                            match client.embed(&prompt_lower).await {
-                                Ok(embedding) => {
-                                    let matches = graph::find_similar_triggers(
-                                        &graph_conn,
-                                        &embedding,
-                                        sem_config.default_threshold,
-                                        sem_config.query_floor_threshold,
-                                        &ctx.namespaces,
-                                    ).await?;
+                        Some(client) => match client.embed(&prompt_lower).await {
+                            Ok(embedding) => {
+                                let matches = graph::find_similar_triggers(
+                                    &graph_conn,
+                                    &embedding,
+                                    sem_config.default_threshold,
+                                    sem_config.query_floor_threshold,
+                                    &ctx.namespaces,
+                                )
+                                .await?;
 
-                                    if matches.is_empty() {
-                                        println!("  (none above floor {:.2})", sem_config.query_floor_threshold);
-                                    } else {
-                                        for m in matches {
-                                            let sim = m.similarity.unwrap_or(0.0);
-                                            println!("  ✓ \"{}\" (similarity: {:.2})", m.name, sim);
-                                        }
+                                if matches.is_empty() {
+                                    println!(
+                                        "  (none above floor {:.2})",
+                                        sem_config.query_floor_threshold
+                                    );
+                                } else {
+                                    for m in matches {
+                                        let sim = m.similarity.unwrap_or(0.0);
+                                        println!("  ✓ \"{}\" (similarity: {:.2})", m.name, sim);
                                     }
                                 }
-                                Err(e) => {
-                                    println!("  (error getting embedding: {e})");
-                                }
                             }
-                        }
+                            Err(e) => {
+                                println!("  (error getting embedding: {e})");
+                            }
+                        },
                         None => {
                             println!("  (ollama client not configured)");
                         }
@@ -1849,7 +2130,9 @@ async fn main() -> Result<()> {
                     if matched {
                         let topic = extract_topic(&prompt_lower, pattern);
                         if json {
-                            println!(r#"{{"type":"regex","topic":"{topic}","pattern":"{pattern}"}}"#);
+                            println!(
+                                r#"{{"type":"regex","topic":"{topic}","pattern":"{pattern}"}}"#
+                            );
                         } else {
                             println!("{topic}");
                         }
@@ -1860,28 +2143,30 @@ async fn main() -> Result<()> {
                 let sem_config = config::SemanticConfig::load();
                 if sem_config.enabled
                     && let Some(client) = embeddings::OllamaClient::from_config(&sem_config)
-                        && let Ok(embedding) = client.embed(&prompt_lower).await {
-                            let matches = graph::find_similar_triggers(
-                                &graph_conn,
-                                &embedding,
-                                sem_config.default_threshold,
-                                sem_config.query_floor_threshold,
-                                &ctx.namespaces,
-                            ).await?;
+                    && let Ok(embedding) = client.embed(&prompt_lower).await
+                {
+                    let matches = graph::find_similar_triggers(
+                        &graph_conn,
+                        &embedding,
+                        sem_config.default_threshold,
+                        sem_config.query_floor_threshold,
+                        &ctx.namespaces,
+                    )
+                    .await?;
 
-                            if let Some(m) = matches.first() {
-                                if json {
-                                    println!(
-                                        r#"{{"type":"semantic","topic":"{}","similarity":{:.2}}}"#,
-                                        m.name,
-                                        m.similarity.unwrap_or(0.0)
-                                    );
-                                } else {
-                                    println!("{}", m.name);
-                                }
-                                return Ok(());
-                            }
+                    if let Some(m) = matches.first() {
+                        if json {
+                            println!(
+                                r#"{{"type":"semantic","topic":"{}","similarity":{:.2}}}"#,
+                                m.name,
+                                m.similarity.unwrap_or(0.0)
+                            );
+                        } else {
+                            println!("{}", m.name);
                         }
+                        return Ok(());
+                    }
+                }
 
                 if json {
                     println!(r#"{{"type":"none"}}"#);
@@ -1904,7 +2189,9 @@ async fn main() -> Result<()> {
                 println!("✓ All concepts/patches already have temporal fields.");
             } else {
                 println!("Found {temporal_count} concepts/patches without temporal fields.");
-                println!("Adding bi-temporal fields (valid_at, invalid_at, expired_at, created_at)...");
+                println!(
+                    "Adding bi-temporal fields (valid_at, invalid_at, expired_at, created_at)..."
+                );
                 graph::migrate_add_temporal_fields(&graph_conn).await?;
                 println!("✓ Bi-temporal migration complete.");
             }
@@ -1930,9 +2217,14 @@ async fn main() -> Result<()> {
 
             println!("\nMigration finished.");
         }
-        Commands::Describe { concept, description } => {
+        Commands::Describe {
+            concept,
+            description,
+        } => {
             let semantic_config = config::SemanticConfig::load();
-            let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) { c } else {
+            let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
+                c
+            } else {
                 eprintln!("Error: Semantic search not configured. Check ~/.c0/config.toml");
                 return Ok(());
             };
@@ -1946,19 +2238,30 @@ async fn main() -> Result<()> {
                 &ctx.namespace,
                 &description,
                 &embedding,
-            ).await?;
+            )
+            .await?;
 
             if updated {
                 println!("Updated concept: {concept}");
                 println!("  description: {description}");
                 println!("  embedding: regenerated from description");
             } else {
-                eprintln!("Concept '{}' not found in namespace '{}'", concept, ctx.namespace);
+                eprintln!(
+                    "Concept '{}' not found in namespace '{}'",
+                    concept, ctx.namespace
+                );
             }
         }
-        Commands::Fetch { query, limit, all, fresh } => {
+        Commands::Fetch {
+            query,
+            limit,
+            all,
+            fresh,
+        } => {
             let semantic_config = config::SemanticConfig::load();
-            let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) { c } else {
+            let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
+                c
+            } else {
                 eprintln!("Error: Semantic search not configured");
                 return Ok(());
             };
@@ -1972,7 +2275,8 @@ async fn main() -> Result<()> {
                 semantic_config.query_floor_threshold,
                 &ctx.namespaces,
                 limit,
-            ).await?;
+            )
+            .await?;
 
             if results.is_empty() {
                 println!("No matching sources found.");
@@ -1985,7 +2289,12 @@ async fn main() -> Result<()> {
             let sources_to_fetch = if all { &results[..] } else { &results[..1] };
 
             for (source, similarity) in sources_to_fetch {
-                println!("📡 [{:.0}%] {} ({})", similarity * 100.0, source.name, source.source_type);
+                println!(
+                    "📡 [{:.0}%] {} ({})",
+                    similarity * 100.0,
+                    source.name,
+                    source.source_type
+                );
                 println!("   {}", source.url);
 
                 let fetch_result = if fresh {
@@ -2008,7 +2317,12 @@ async fn main() -> Result<()> {
             if !all && results.len() > 1 {
                 println!("Other matches:");
                 for (source, similarity) in &results[1..] {
-                    println!("  [{:.0}%] {} - {}", similarity * 100.0, source.name, source.url);
+                    println!(
+                        "  [{:.0}%] {} - {}",
+                        similarity * 100.0,
+                        source.name,
+                        source.url
+                    );
                 }
                 println!("\nUse --all to fetch all matches");
             }
@@ -2018,17 +2332,21 @@ async fn main() -> Result<()> {
                 let count = fetch::clear_cache()?;
                 println!("Cleared {count} cached entries.");
             }
-        }
+        },
         Commands::Backfill { what } => match what {
             BackfillCommands::Embeddings { dry_run } => {
                 let semantic_config = config::SemanticConfig::load();
-                let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) { c } else {
-                    eprintln!("Error: Semantic search not configured. Check ~/.c0/config.toml");
-                    return Ok(());
-                };
+                let client =
+                    if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
+                        c
+                    } else {
+                        eprintln!("Error: Semantic search not configured. Check ~/.c0/config.toml");
+                        return Ok(());
+                    };
 
                 graph::ensure_concept_embedding_index(&graph_conn).await?;
-                let concepts = graph::get_concepts_without_embeddings(&graph_conn, &ctx.namespaces).await?;
+                let concepts =
+                    graph::get_concepts_without_embeddings(&graph_conn, &ctx.namespaces).await?;
 
                 if concepts.is_empty() {
                     println!("All concepts already have embeddings.");
@@ -2051,7 +2369,13 @@ async fn main() -> Result<()> {
                 for (name, namespace) in &concepts {
                     match client.embed(name).await {
                         Ok(embedding) => {
-                            graph::update_concept_embedding(&graph_conn, name, namespace, &embedding).await?;
+                            graph::update_concept_embedding(
+                                &graph_conn,
+                                name,
+                                namespace,
+                                &embedding,
+                            )
+                            .await?;
                             println!("  ✓ {name}");
                             success += 1;
                         }
@@ -2064,7 +2388,11 @@ async fn main() -> Result<()> {
                 println!("\nBackfill complete: {success} success, {failed} failed");
             }
         },
-        Commands::Extract { input, index, dry_run } => {
+        Commands::Extract {
+            input,
+            index,
+            dry_run,
+        } => {
             use std::path::PathBuf;
 
             let input_path = PathBuf::from(shellexpand::tilde(&input).to_string());
@@ -2075,13 +2403,20 @@ async fn main() -> Result<()> {
 
             let extract_config = extract::extract_config();
             println!("📝 Extracting transcript from: {}", input_path.display());
-            println!("   Using model: {} on {}", extract_config.model, extract_config.host);
+            println!(
+                "   Using model: {} on {}",
+                extract_config.model, extract_config.host
+            );
             println!("   This may take a few minutes...\n");
 
             let extraction = extract::extract_transcript(&input_path).await?;
 
             let summary_md = extract::generate_summary_markdown(&extraction, &ctx.namespace);
-            let patch_name = extract::get_patch_name(&extraction.metadata.date, &extraction.metadata.title, &ctx.namespace);
+            let patch_name = extract::get_patch_name(
+                &extraction.metadata.date,
+                &extraction.metadata.title,
+                &ctx.namespace,
+            );
 
             println!("✓ Extraction complete!\n");
             println!("{summary_md}");
@@ -2095,7 +2430,8 @@ async fn main() -> Result<()> {
             let transcripts_dir = patches_dir.join("transcripts");
             std::fs::create_dir_all(&transcripts_dir)?;
 
-            let summary_path = transcripts_dir.join(format!("{}-summary.md", extraction.metadata.date));
+            let summary_path =
+                transcripts_dir.join(format!("{}-summary.md", extraction.metadata.date));
             std::fs::write(&summary_path, &summary_md)?;
             println!("📄 Wrote summary to: {}", summary_path.display());
 
@@ -2113,12 +2449,23 @@ async fn main() -> Result<()> {
                     Some("transcript-extraction"),
                     None,
                     None,
-                ).await?;
+                )
+                .await?;
                 println!("   Created patch: {patch_name}");
 
-                let ns_exists = !graph::search_concepts(&graph_conn, &ctx.namespace, &ctx.namespaces).await?.is_empty();
+                let ns_exists =
+                    !graph::search_concepts(&graph_conn, &ctx.namespace, &ctx.namespaces)
+                        .await?
+                        .is_empty();
                 if ns_exists {
-                    graph::relate(&graph_conn, &ctx.namespace, "HAS_PATCH", &patch_name, &ctx.namespaces).await?;
+                    graph::relate(
+                        &graph_conn,
+                        &ctx.namespace,
+                        "HAS_PATCH",
+                        &patch_name,
+                        &ctx.namespaces,
+                    )
+                    .await?;
                     println!("   Linked: {} -[HAS_PATCH]-> {patch_name}", ctx.namespace);
                 }
 
@@ -2142,10 +2489,18 @@ async fn main() -> Result<()> {
                                     None,
                                     Some(&embedding),
                                     None,
-                                ).await?;
+                                )
+                                .await?;
                                 println!("   Created concept: {concept_name}");
 
-                                graph::relate(&graph_conn, concept_name, "DISCUSSED_IN", &patch_name, &ctx.namespaces).await?;
+                                graph::relate(
+                                    &graph_conn,
+                                    concept_name,
+                                    "DISCUSSED_IN",
+                                    &patch_name,
+                                    &ctx.namespaces,
+                                )
+                                .await?;
                             }
                             Err(e) => {
                                 eprintln!("   ⚠ Could not create concept {concept_name}: {e}");
@@ -2161,10 +2516,16 @@ async fn main() -> Result<()> {
                     println!("  c0 walk \"{}\"", topic.normalized_name);
                 }
             }
-        },
+        }
         Commands::Invalidate { what } => match what {
-            InvalidateCommands::Concept { name, as_of, by, reason } => {
-                let invalid_at = as_of.as_ref()
+            InvalidateCommands::Concept {
+                name,
+                as_of,
+                by,
+                reason,
+            } => {
+                let invalid_at = as_of
+                    .as_ref()
                     .map(|s| parse_date_to_datetime(s))
                     .transpose()?;
 
@@ -2176,7 +2537,9 @@ async fn main() -> Result<()> {
                     by.as_deref(),
                     reason.as_deref(),
                     &ctx.namespaces,
-                ).await? {
+                )
+                .await?
+                {
                     Some(invalid_dt) => {
                         println!("✓ Invalidated concept: {} [{}]", name, ctx.namespace);
                         println!("  invalid_at: {invalid_dt}");
@@ -2188,12 +2551,21 @@ async fn main() -> Result<()> {
                         }
                     }
                     None => {
-                        eprintln!("Concept '{}' not found or already invalidated in namespace '{}'", name, ctx.namespace);
+                        eprintln!(
+                            "Concept '{}' not found or already invalidated in namespace '{}'",
+                            name, ctx.namespace
+                        );
                     }
                 }
             }
-            InvalidateCommands::Patch { name, as_of, by, reason } => {
-                let invalid_at = as_of.as_ref()
+            InvalidateCommands::Patch {
+                name,
+                as_of,
+                by,
+                reason,
+            } => {
+                let invalid_at = as_of
+                    .as_ref()
                     .map(|s| parse_date_to_datetime(s))
                     .transpose()?;
 
@@ -2205,7 +2577,9 @@ async fn main() -> Result<()> {
                     by.as_deref(),
                     reason.as_deref(),
                     &ctx.namespaces,
-                ).await? {
+                )
+                .await?
+                {
                     Some(invalid_dt) => {
                         println!("✓ Invalidated patch: {name}");
                         println!("  invalid_at: {invalid_dt}");
@@ -2223,11 +2597,14 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Supersede { old, with, as_of } => {
-            let expired_at = as_of.as_ref()
+            let expired_at = as_of
+                .as_ref()
                 .map(|s| parse_date_to_datetime(s))
                 .transpose()?;
 
-            let success = graph::supersede_concept(&graph_conn, &old, &with, &ctx.namespaces, expired_at).await?;
+            let success =
+                graph::supersede_concept(&graph_conn, &old, &with, &ctx.namespaces, expired_at)
+                    .await?;
 
             if success {
                 println!("✓ Superseded: {old} → {with}");
@@ -2235,7 +2612,8 @@ async fn main() -> Result<()> {
                     println!("  as_of: {dt}");
                 }
 
-                let chain = graph::get_supersession_chain(&graph_conn, &with, &ctx.namespaces).await?;
+                let chain =
+                    graph::get_supersession_chain(&graph_conn, &with, &ctx.namespaces).await?;
                 if chain.len() > 1 {
                     println!("\nSupersession chain:");
                     for (name, expired_at) in &chain {
@@ -2248,15 +2626,25 @@ async fn main() -> Result<()> {
                 }
             } else {
                 eprintln!("Failed to supersede: concepts not found or '{old}' already expired");
-                eprintln!("Make sure both '{}' and '{}' exist in namespaces {:?}", old, with, ctx.namespaces);
+                eprintln!(
+                    "Make sure both '{}' and '{}' exist in namespaces {:?}",
+                    old, with, ctx.namespaces
+                );
             }
-        },
-        Commands::ExtractConcepts { prompt, limit, known_only, json } => {
+        }
+        Commands::ExtractConcepts {
+            prompt,
+            limit,
+            known_only,
+            json,
+        } => {
             let extraction_config = config::ExtractionConfig::load();
 
             if !extraction_config.enabled {
                 if json {
-                    println!(r#"{{"error":"extraction disabled","known":[],"unknown":[],"queued":false}}"#);
+                    println!(
+                        r#"{{"error":"extraction disabled","known":[],"unknown":[],"queued":false}}"#
+                    );
                 } else {
                     eprintln!("Concept extraction is disabled in config");
                 }
@@ -2270,7 +2658,10 @@ async fn main() -> Result<()> {
                 extraction_config.timeout_secs,
             );
 
-            let concepts = match client.extract_concepts(&prompt, &ctx.namespace, limit).await {
+            let concepts = match client
+                .extract_concepts(&prompt, &ctx.namespace, limit)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     if json {
@@ -2293,12 +2684,11 @@ async fn main() -> Result<()> {
             let mut unknown_concepts = Vec::new();
 
             for concept in &concepts {
-                let search_results = graph::search_concepts(&graph_conn, concept, &ctx.namespaces).await?;
+                let search_results =
+                    graph::search_concepts(&graph_conn, concept, &ctx.namespaces).await?;
                 let has_match = search_results.iter().any(|r| {
                     let r_lower = r.to_lowercase();
-                    r_lower == *concept ||
-                    r_lower.contains(concept) ||
-                    concept.contains(&r_lower)
+                    r_lower == *concept || r_lower.contains(concept) || concept.contains(&r_lower)
                 });
                 if has_match {
                     if let Some(best_match) = search_results.first() {
@@ -2381,7 +2771,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        },
+        }
         Commands::InvalidationChain { name } => {
             let chain = graph::get_invalidation_chain(&graph_conn, &name, &ctx.namespaces).await?;
             if chain.is_empty() {
@@ -2389,9 +2779,8 @@ async fn main() -> Result<()> {
             } else {
                 println!("Invalidation chain for '{name}':");
                 for record in chain {
-                    let invalid_at_str = record.invalid_at
-                        .as_deref()
-                        .unwrap_or("(not invalidated)");
+                    let invalid_at_str =
+                        record.invalid_at.as_deref().unwrap_or("(not invalidated)");
                     println!("  {} (invalid_at: {})", record.name, invalid_at_str);
                     if let Some(by) = record.invalidated_by {
                         println!("    └─ INVALIDATED_BY: {by}");
@@ -2401,38 +2790,53 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        },
-        Commands::Audit { action } => {
-            match action {
-                AuditCommands::Staleness { namespace, days, json } => {
-                    let ns = namespace.as_ref().unwrap_or(&ctx.namespace);
-                    audit::staleness(&graph_conn, ns, &ctx.namespaces, days, json).await?;
+        }
+        Commands::Audit { action } => match action {
+            AuditCommands::Staleness {
+                namespace,
+                days,
+                json,
+            } => {
+                let ns = namespace.as_ref().unwrap_or(&ctx.namespace);
+                audit::staleness(&graph_conn, ns, &ctx.namespaces, days, json).await?;
+            }
+            AuditCommands::Namespaces { suggest, json } => {
+                audit::namespaces(&graph_conn, &ctx.namespaces, suggest, json).await?;
+            }
+            AuditCommands::All { json } => {
+                audit::staleness(&graph_conn, &ctx.namespace, &ctx.namespaces, 90, json).await?;
+                if !json {
+                    println!();
                 }
-                AuditCommands::Namespaces { suggest, json } => {
-                    audit::namespaces(&graph_conn, &ctx.namespaces, suggest, json).await?;
-                }
-                AuditCommands::All { json } => {
-                    audit::staleness(&graph_conn, &ctx.namespace, &ctx.namespaces, 90, json).await?;
-                    if !json { println!(); }
-                    audit::namespaces(&graph_conn, &ctx.namespaces, false, json).await?;
-                }
+                audit::namespaces(&graph_conn, &ctx.namespaces, false, json).await?;
             }
         },
         Commands::Move { what } => match what {
-            MoveCommands::Concept { name, to, with_patches } => {
-                match graph::move_concept(&graph_conn, &name, &to, with_patches).await? {
-                    Some(result) => {
-                        println!("✓ Moved concept: {} [{} → {}]", name, result.old_namespace, result.new_namespace);
-                        if result.patches_moved > 0 {
-                            println!("  Also moved {} patch(es)", result.patches_moved);
-                        }
-                    }
-                    None => {
-                        eprintln!("Concept '{name}' not found or already in namespace '{to}'");
+            MoveCommands::Concept {
+                name,
+                to,
+                with_patches,
+            } => match graph::move_concept(&graph_conn, &name, &to, with_patches).await? {
+                Some(result) => {
+                    println!(
+                        "✓ Moved concept: {} [{} → {}]",
+                        name, result.old_namespace, result.new_namespace
+                    );
+                    if result.patches_moved > 0 {
+                        println!("  Also moved {} patch(es)", result.patches_moved);
                     }
                 }
-            }
-            MoveCommands::Prefix { prefix, to, from, with_patches, dry_run } => {
+                None => {
+                    eprintln!("Concept '{name}' not found or already in namespace '{to}'");
+                }
+            },
+            MoveCommands::Prefix {
+                prefix,
+                to,
+                from,
+                with_patches,
+                dry_run,
+            } => {
                 let concepts = graph::list_concepts_by_prefix(&graph_conn, &prefix, &from).await?;
 
                 if concepts.is_empty() {
@@ -2440,7 +2844,12 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                println!("Found {} concept(s) with prefix '{}' in '{}':", concepts.len(), prefix, from);
+                println!(
+                    "Found {} concept(s) with prefix '{}' in '{}':",
+                    concepts.len(),
+                    prefix,
+                    from
+                );
                 for name in &concepts {
                     println!("  {name}");
                 }
@@ -2451,9 +2860,9 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                let (concepts_moved, patches_moved) = graph::move_concepts_by_prefix(
-                    &graph_conn, &prefix, &from, &to, with_patches
-                ).await?;
+                let (concepts_moved, patches_moved) =
+                    graph::move_concepts_by_prefix(&graph_conn, &prefix, &from, &to, with_patches)
+                        .await?;
 
                 println!("\n✓ Moved {concepts_moved} concept(s) from '{from}' to '{to}'");
                 if patches_moved > 0 {
@@ -2461,32 +2870,51 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Search { query, limit, threshold, json, vector_only, keyword_only } => {
+        Commands::Search {
+            query,
+            limit,
+            threshold,
+            json,
+            vector_only,
+            keyword_only,
+        } => {
             let hybrid_config = graph::HybridSearchConfig {
                 vector_threshold: threshold,
                 ..Default::default()
             };
 
             let results = if keyword_only {
-                graph::search_concepts_fulltext(
-                    &graph_conn, &query, limit, &ctx.namespaces,
-                ).await?
+                graph::search_concepts_fulltext(&graph_conn, &query, limit, &ctx.namespaces).await?
             } else {
                 let semantic_config = config::SemanticConfig::load();
-                let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) { c } else {
-                    eprintln!("Error: Semantic search not configured. Check ~/.c0/config.toml");
-                    return Ok(());
-                };
+                let client =
+                    if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
+                        c
+                    } else {
+                        eprintln!("Error: Semantic search not configured. Check ~/.c0/config.toml");
+                        return Ok(());
+                    };
                 let query_embedding = client.embed(&query).await?;
 
                 if vector_only {
                     graph::search_concepts_semantic(
-                        &graph_conn, &query_embedding, limit, threshold, &ctx.namespaces,
-                    ).await?
+                        &graph_conn,
+                        &query_embedding,
+                        limit,
+                        threshold,
+                        &ctx.namespaces,
+                    )
+                    .await?
                 } else {
                     graph::search_hybrid(
-                        &graph_conn, &query, &query_embedding, limit, &ctx.namespaces, &hybrid_config,
-                    ).await?
+                        &graph_conn,
+                        &query,
+                        &query_embedding,
+                        limit,
+                        &ctx.namespaces,
+                        &hybrid_config,
+                    )
+                    .await?
                 }
             };
 
@@ -2495,15 +2923,27 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mode_label = if keyword_only { "keyword" } else if vector_only { "vector" } else { "hybrid" };
+            let mode_label = if keyword_only {
+                "keyword"
+            } else if vector_only {
+                "vector"
+            } else {
+                "hybrid"
+            };
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {
                 if vector_only {
-                    println!("{:<6} {:<16} {:<30} {}", "score", "namespace", "name", "description");
+                    println!(
+                        "{:<6} {:<16} {:<30} {}",
+                        "score", "namespace", "name", "description"
+                    );
                 } else {
-                    println!("{:<10} {:<16} {:<30} {}", "score", "namespace", "name", "description");
+                    println!(
+                        "{:<10} {:<16} {:<30} {}",
+                        "score", "namespace", "name", "description"
+                    );
                 }
                 println!("{}", "─".repeat(80));
                 for r in &results {
@@ -2514,28 +2954,34 @@ async fn main() -> Result<()> {
                         desc.to_string()
                     };
                     if vector_only {
-                        println!("{:<6.0}% {:<16} {:<30} {}",
+                        println!(
+                            "{:<6.0}% {:<16} {:<30} {}",
                             r.similarity * 100.0,
                             r.namespace,
                             r.name,
-                            desc_truncated);
+                            desc_truncated
+                        );
                     } else {
-                        println!("{:<10.6} {:<16} {:<30} {}",
-                            r.similarity,
-                            r.namespace,
-                            r.name,
-                            desc_truncated);
+                        println!(
+                            "{:<10.6} {:<16} {:<30} {}",
+                            r.similarity, r.namespace, r.name, desc_truncated
+                        );
                     }
                 }
-                println!("\n({mode_label} search, {count} results)", count = results.len());
+                println!(
+                    "\n({mode_label} search, {count} results)",
+                    count = results.len()
+                );
             }
         }
-        Commands::Export { format, namespace, output, no_embeddings } => {
-            let graph_export = export::export_graph(
-                &graph_conn,
-                namespace.as_deref(),
-                no_embeddings,
-            ).await?;
+        Commands::Export {
+            format,
+            namespace,
+            output,
+            no_embeddings,
+        } => {
+            let graph_export =
+                export::export_graph(&graph_conn, namespace.as_deref(), no_embeddings).await?;
 
             let content = match format.as_str() {
                 "cypher" => export::format_cypher(&graph_export),
@@ -2544,17 +2990,23 @@ async fn main() -> Result<()> {
 
             if let Some(ref path) = output {
                 std::fs::write(path, &content)?;
-                println!("Exported {} nodes and {} relationships to {}",
+                println!(
+                    "Exported {} nodes and {} relationships to {}",
                     graph_export.metadata.node_count,
                     graph_export.metadata.relationship_count,
-                    path);
+                    path
+                );
             } else {
                 println!("{content}");
             }
         }
         #[cfg(feature = "sessions")]
         Commands::Sessions { .. } | Commands::Turns { .. } => unreachable!(),
-        Commands::Init { .. } | Commands::Status | Commands::Reflector { .. } | Commands::Config { .. } | Commands::Health { .. } => unreachable!(),
+        Commands::Init { .. }
+        | Commands::Status
+        | Commands::Reflector { .. }
+        | Commands::Config { .. }
+        | Commands::Health { .. } => unreachable!(),
     }
 
     Ok(())

@@ -123,15 +123,13 @@ impl ClaudeConfig {
             "concept_extraction" => self.concept_extraction_provider.as_ref(),
             _ => None,
         };
-        override_value
-            .cloned()
-            .unwrap_or_else(|| {
-                if self.enabled {
-                    self.provider.clone()
-                } else {
-                    "ollama".to_string()
-                }
-            })
+        override_value.cloned().unwrap_or_else(|| {
+            if self.enabled {
+                self.provider.clone()
+            } else {
+                "ollama".to_string()
+            }
+        })
     }
 }
 
@@ -391,13 +389,17 @@ impl ExtractionConfig {
 }
 
 fn load_global_config() -> GlobalConfig {
-    let config_path = dirs::home_dir().map_or_else(|| PathBuf::from(".c0/config.toml"), |h| h.join(".c0/config.toml"));
+    let config_path = dirs::home_dir().map_or_else(
+        || PathBuf::from(".c0/config.toml"),
+        |h| h.join(".c0/config.toml"),
+    );
 
     if config_path.exists()
         && let Ok(content) = std::fs::read_to_string(&config_path)
-            && let Ok(config) = toml::from_str::<GlobalConfig>(&content) {
-                return config;
-            }
+        && let Ok(config) = toml::from_str::<GlobalConfig>(&content)
+    {
+        return config;
+    }
 
     GlobalConfig {
         ollama: OllamaConfig::default(),
@@ -440,26 +442,25 @@ pub fn detect_namespace() -> NamespaceContext {
         let config_file = c0_dir.join("config.toml");
 
         if config_file.exists()
-            && let Ok(config) = read_config(&config_file) {
-                let (parent_dirs, parent_namespaces) = resolve_parent_chain(
-                    config.parent_namespace.as_deref(),
-                    &c0_dir,
-                );
+            && let Ok(config) = read_config(&config_file)
+        {
+            let (parent_dirs, parent_namespaces) =
+                resolve_parent_chain(config.parent_namespace.as_deref(), &c0_dir);
 
-                let mut namespaces = vec![config.namespace.clone()];
-                namespaces.extend(parent_namespaces);
-                if config.inherit_global && !namespaces.contains(&"global".to_string()) {
-                    namespaces.push("global".to_string());
-                }
-
-                return NamespaceContext {
-                    namespace: config.namespace,
-                    project_dir: Some(c0_dir),
-                    parent_dirs,
-                    namespaces,
-                    project_type: config.project_type,
-                };
+            let mut namespaces = vec![config.namespace.clone()];
+            namespaces.extend(parent_namespaces);
+            if config.inherit_global && !namespaces.contains(&"global".to_string()) {
+                namespaces.push("global".to_string());
             }
+
+            return NamespaceContext {
+                namespace: config.namespace,
+                project_dir: Some(c0_dir),
+                parent_dirs,
+                namespaces,
+                project_type: config.project_type,
+            };
+        }
 
         if !dir.pop() {
             break;
@@ -510,7 +511,10 @@ fn resolve_parent_chain(
     (parent_dirs, parent_namespaces)
 }
 
-fn find_namespace_dir(namespace: &str, start_dir: Option<&Path>) -> Option<(PathBuf, ProjectConfig)> {
+fn find_namespace_dir(
+    namespace: &str,
+    start_dir: Option<&Path>,
+) -> Option<(PathBuf, ProjectConfig)> {
     let mut search_dir = start_dir.map(std::path::Path::to_path_buf);
 
     while let Some(ref dir) = search_dir {
@@ -519,9 +523,10 @@ fn find_namespace_dir(namespace: &str, start_dir: Option<&Path>) -> Option<(Path
 
         if config_file.exists()
             && let Ok(config) = read_config(&config_file)
-                && config.namespace == namespace {
-                    return Some((c0_dir, config));
-                }
+            && config.namespace == namespace
+        {
+            return Some((c0_dir, config));
+        }
 
         search_dir = dir.parent().map(std::path::Path::to_path_buf);
     }
@@ -531,9 +536,10 @@ fn find_namespace_dir(namespace: &str, start_dir: Option<&Path>) -> Option<(Path
         let config_file = global_c0.join("config.toml");
         if config_file.exists()
             && let Ok(config) = read_config(&config_file)
-                && config.namespace == namespace {
-                    return Some((global_c0, config));
-                }
+            && config.namespace == namespace
+        {
+            return Some((global_c0, config));
+        }
     }
 
     None
@@ -603,9 +609,7 @@ acceptance criteria
 "
         )
     } else {
-        format!(
-            "# {namespace} Memory Trigger Patterns\n# Add project-specific triggers here\n\n"
-        )
+        format!("# {namespace} Memory Trigger Patterns\n# Add project-specific triggers here\n\n")
     };
     std::fs::write(c0_dir.join("triggers.txt"), triggers_content)?;
 
@@ -636,7 +640,10 @@ acceptance criteria
 ",
             namespace,
         );
-        std::fs::write(c0_dir.join("patches").join("client-overview.md"), client_overview)?;
+        std::fs::write(
+            c0_dir.join("patches").join("client-overview.md"),
+            client_overview,
+        )?;
 
         let claude_md = format!(
             r#"# {} - Solution Project

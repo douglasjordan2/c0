@@ -22,7 +22,12 @@ fn ensure_dir() -> Result<PathBuf> {
     let dir = reflector_dir();
     fs::create_dir_all(&dir)?;
 
-    for file in &["inbox.jsonl", "proposed.jsonl", "review.jsonl", "pending-commits.jsonl"] {
+    for file in &[
+        "inbox.jsonl",
+        "proposed.jsonl",
+        "review.jsonl",
+        "pending-commits.jsonl",
+    ] {
         let path = dir.join(file);
         if !path.exists() {
             fs::write(&path, "")?;
@@ -103,7 +108,10 @@ pub fn inbox() -> Result<()> {
         println!("═══════════════════════════════════════");
         for line in lines.iter().rev().take(20) {
             if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-                let timestamp = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?");
+                let timestamp = entry
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("?");
                 let query = entry.get("query").and_then(|v| v.as_str()).unwrap_or("?");
                 let session = entry.get("session").and_then(|v| v.as_str()).unwrap_or("?");
@@ -148,9 +156,7 @@ pub fn proposed() -> Result<()> {
                 println!("   Reason: {reason}");
 
                 if let Some(relations) = entry.get("relations").and_then(|v| v.as_array()) {
-                    let rels: Vec<&str> = relations.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect();
+                    let rels: Vec<&str> = relations.iter().filter_map(|v| v.as_str()).collect();
                     if !rels.is_empty() {
                         println!("   Relations: {}", rels.join(", "));
                     }
@@ -225,8 +231,14 @@ pub fn review() -> Result<()> {
     for (i, line) in lines.iter().enumerate() {
         if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
             let query = entry.get("query").and_then(|v| v.as_str()).unwrap_or("?");
-            let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("Ghost was uncertain");
-            let timestamp = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?");
+            let reason = entry
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Ghost was uncertain");
+            let timestamp = entry
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
 
             println!("{}. \"{}\"", i + 1, query);
             println!("   Reason: {reason}");
@@ -274,7 +286,11 @@ pub fn review() -> Result<()> {
     fs::write(&review_path, new_content)?;
 
     println!("═══════════════════════════════════════");
-    println!("Processed {} item(s). {} remaining in queue.", processed, remaining_lines.len());
+    println!(
+        "Processed {} item(s). {} remaining in queue.",
+        processed,
+        remaining_lines.len()
+    );
 
     Ok(())
 }
@@ -348,7 +364,11 @@ pub fn apply() -> Result<()> {
     fs::write(&pending_path, new_content)?;
 
     println!("═══════════════════════════════════════");
-    println!("Applied {} concept(s). {} failed (kept in queue).", applied, failed.len());
+    println!(
+        "Applied {} concept(s). {} failed (kept in queue).",
+        applied,
+        failed.len()
+    );
 
     Ok(())
 }
@@ -458,7 +478,8 @@ async fn classify_query_llm(
     let session_id = get_reflector_session_id();
 
     let response = if let Some(ref sid) = session_id {
-        llm.generate_resume(&prompt, sid, Some(CLASSIFY_SCHEMA)).await?
+        llm.generate_resume(&prompt, sid, Some(CLASSIFY_SCHEMA))
+            .await?
     } else {
         let system_context = "You are the c0 knowledge curator. You help classify dead-end queries from a knowledge graph system, deciding which should become new concepts (COMMIT), which are noise (DISCARD), and which need human review (QUEUE). Build context over time about the domain and project patterns.";
         let full_prompt = format!("{system_context}\n\n{prompt}");
@@ -480,8 +501,9 @@ async fn classify_query_llm(
         result_str
     };
 
-    let classification: ClassifyResponse = serde_json::from_str(result_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse LLM response: {e}\nResponse: {result_str}"))?;
+    let classification: ClassifyResponse = serde_json::from_str(result_str).map_err(|e| {
+        anyhow::anyhow!("Failed to parse LLM response: {e}\nResponse: {result_str}")
+    })?;
 
     Ok((classification, response.total_cost_usd))
 }
@@ -503,7 +525,8 @@ async fn classify_query(
             query,
             namespace,
             context,
-        ).await?;
+        )
+        .await?;
         Ok((result, None))
     } else {
         let llm = LlmClient::for_task(config, "classification", config.claude.timeout_secs);
@@ -537,10 +560,11 @@ pub async fn process() -> Result<()> {
     for line in &lines {
         if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line)
             && let Some(query) = entry.get("query").and_then(|v| v.as_str())
-                && !seen_queries.contains(query) {
-                    seen_queries.insert(query.to_string());
-                    unique_entries.push(entry);
-                }
+            && !seen_queries.contains(query)
+        {
+            seen_queries.insert(query.to_string());
+            unique_entries.push(entry);
+        }
     }
 
     println!(
@@ -561,10 +585,7 @@ pub async fn process() -> Result<()> {
     let mut discarded = 0;
 
     for entry in &unique_entries {
-        let query = entry
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let query = entry.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let session = entry
             .get("session")
             .and_then(|v| v.as_str())
@@ -573,9 +594,7 @@ pub async fn process() -> Result<()> {
             .get("namespace")
             .and_then(|v| v.as_str())
             .unwrap_or("global");
-        let context = entry
-            .get("context")
-            .and_then(|v| v.as_str());
+        let context = entry.get("context").and_then(|v| v.as_str());
 
         print!("  {query} ... ");
         io::stdout().flush()?;
@@ -709,7 +728,6 @@ pub async fn notify() -> Result<()> {
         let _ = fs::remove_file(&state_path);
         return Ok(());
     }
-
 
     let (last_pending, last_review) = if state_path.exists() {
         fs::read_to_string(&state_path)

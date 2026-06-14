@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use std::io::Write;
 use std::path::PathBuf;
@@ -155,7 +155,8 @@ impl LlmClient {
         session_id: &str,
         json_schema: Option<&str>,
     ) -> Result<LlmResponse> {
-        self.generate_internal(prompt, json_schema, Some(session_id)).await
+        self.generate_internal(prompt, json_schema, Some(session_id))
+            .await
     }
 
     async fn generate_internal(
@@ -168,15 +169,23 @@ impl LlmClient {
             return self.generate_ollama(prompt, json_schema).await;
         }
         if matches!(self.provider, LlmProvider::ClaudeCli) {
-            return self.generate_claude(prompt, json_schema, resume_session).await;
+            return self
+                .generate_claude(prompt, json_schema, resume_session)
+                .await;
         }
         if self.api_key.is_some() && matches!(self.provider, LlmProvider::Claude) {
             return self.generate_anthropic_api(prompt, json_schema).await;
         }
         match self.provider {
-            LlmProvider::Claude => self.generate_claude(prompt, json_schema, resume_session).await,
+            LlmProvider::Claude => {
+                self.generate_claude(prompt, json_schema, resume_session)
+                    .await
+            }
             LlmProvider::Droid => self.generate_droid(prompt, resume_session).await,
-            LlmProvider::Codex => self.generate_codex(prompt, json_schema, resume_session).await,
+            LlmProvider::Codex => {
+                self.generate_codex(prompt, json_schema, resume_session)
+                    .await
+            }
             LlmProvider::Gemini => self.generate_gemini(prompt, json_schema).await,
             LlmProvider::Kilo => self.generate_kilo(prompt).await,
             LlmProvider::Ollama => unreachable!("Ollama handled above"),
@@ -277,9 +286,17 @@ impl LlmClient {
         }
         args.push(effective_prompt);
         args.push("--output-format".to_string());
-        args.push(if has_schema { "json".to_string() } else { "stream-json".to_string() });
+        args.push(if has_schema {
+            "json".to_string()
+        } else {
+            "stream-json".to_string()
+        });
         args.push("--max-turns".to_string());
-        args.push(if has_schema { "3".to_string() } else { "1".to_string() });
+        args.push(if has_schema {
+            "3".to_string()
+        } else {
+            "1".to_string()
+        });
         args.push("--model".to_string());
         args.push(self.model.clone());
         args.push("--strict-mcp-config".to_string());
@@ -340,14 +357,16 @@ impl LlmClient {
         prompt: &str,
         json_schema: Option<&str>,
     ) -> Result<LlmResponse> {
-        let api_key = self.api_key.as_ref()
+        let api_key = self
+            .api_key
+            .as_ref()
             .ok_or_else(|| anyhow!("ANTHROPIC API key not set"))?;
 
         let model = resolve_anthropic_model_alias(&self.model);
 
         let body = if let Some(schema) = json_schema {
-            let input_schema: serde_json::Value = serde_json::from_str(schema)
-                .map_err(|e| anyhow!("Invalid JSON schema: {e}"))?;
+            let input_schema: serde_json::Value =
+                serde_json::from_str(schema).map_err(|e| anyhow!("Invalid JSON schema: {e}"))?;
             serde_json::json!({
                 "model": model,
                 "max_tokens": 4096,
@@ -388,7 +407,9 @@ impl LlmClient {
             anyhow::bail!("Anthropic API returned {status}: {body_text}");
         }
 
-        let parsed: serde_json::Value = resp.json().await
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| anyhow!("Failed to parse Anthropic API response: {e}"))?;
 
         let mut result_text = String::new();
@@ -398,7 +419,9 @@ impl LlmClient {
                 match block_type {
                     "text" => {
                         if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                            if !result_text.is_empty() { result_text.push('\n'); }
+                            if !result_text.is_empty() {
+                                result_text.push('\n');
+                            }
                             result_text.push_str(t);
                         }
                     }
@@ -413,17 +436,38 @@ impl LlmClient {
         }
 
         let cost = parsed.get("usage").and_then(|u| {
-            let input_tokens = u.get("input_tokens").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            let output_tokens = u.get("output_tokens").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            let cache_read = u.get("cache_read_input_tokens").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            let cache_create = u.get("cache_creation_input_tokens").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            estimate_cost_usd(&model, input_tokens, output_tokens, cache_read, cache_create)
+            let input_tokens = u
+                .get("input_tokens")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let output_tokens = u
+                .get("output_tokens")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let cache_read = u
+                .get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let cache_create = u
+                .get("cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            estimate_cost_usd(
+                &model,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_create,
+            )
         });
 
         Ok(LlmResponse {
             result: result_text,
             total_cost_usd: cost,
-            session_id: parsed.get("id").and_then(|v| v.as_str()).map(std::string::ToString::to_string),
+            session_id: parsed
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string),
             is_error: false,
         })
     }
@@ -542,13 +586,22 @@ impl LlmClient {
         let output = self.run_cli(&args, None).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        let wrapper: serde_json::Value = serde_json::from_str(stdout.trim())
-            .map_err(|e| anyhow!("Failed to parse gemini -o json output: {e}\nOutput: {}", stdout.trim()))?;
+        let wrapper: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+            anyhow!(
+                "Failed to parse gemini -o json output: {e}\nOutput: {}",
+                stdout.trim()
+            )
+        })?;
 
         let response_text = wrapper
             .get("response")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("gemini wrapper missing .response field\nOutput: {}", stdout.trim()))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "gemini wrapper missing .response field\nOutput: {}",
+                    stdout.trim()
+                )
+            })?
             .trim();
 
         let session_id = wrapper
@@ -603,10 +656,8 @@ impl LlmClient {
         let timeout = Duration::from_secs(self.timeout_secs);
         let binary = self.binary.clone();
         let args = args.to_vec();
-        let strip_claude_env = matches!(
-            self.provider,
-            LlmProvider::Claude | LlmProvider::ClaudeCli
-        );
+        let strip_claude_env =
+            matches!(self.provider, LlmProvider::Claude | LlmProvider::ClaudeCli);
         let force_subscription = matches!(self.provider, LlmProvider::ClaudeCli);
         let sandbox_dir = if matches!(self.provider, LlmProvider::Gemini) {
             let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
@@ -662,7 +713,12 @@ impl LlmClient {
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow!("{} CLI failed ({}): {}", binary, output.status, stderr));
+                return Err(anyhow!(
+                    "{} CLI failed ({}): {}",
+                    binary,
+                    output.status,
+                    stderr
+                ));
             }
 
             Ok(output)
@@ -782,7 +838,13 @@ fn temp_file_path(prefix: &str, extension: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_nanos();
-    path.push(format!("c0-{}-{}-{}.{}", prefix, std::process::id(), nanos, extension));
+    path.push(format!(
+        "c0-{}-{}-{}.{}",
+        prefix,
+        std::process::id(),
+        nanos,
+        extension
+    ));
     path
 }
 
@@ -812,28 +874,44 @@ fn parse_claude_json_output(output: &str) -> Result<LlmResponse> {
         // --verbose form: an array of events; find the final `result` event.
         value
             .as_array()
-            .and_then(|arr| arr.iter().rev().find(|v| v.get("type").and_then(|t| t.as_str()) == Some("result")))
+            .and_then(|arr| {
+                arr.iter()
+                    .rev()
+                    .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("result"))
+            })
             .cloned()
             .unwrap_or(value)
     } else {
         value
     };
 
-    let result_text = if let Some(structured) = obj.get("structured_output").filter(|v| !v.is_null()) {
-        serde_json::to_string(structured).unwrap_or_default()
-    } else {
-        // Fall back to the `result` string (used by non-schema responses
-        // that happen to come through this path).
-        obj.get("result").and_then(|r| r.as_str()).unwrap_or("").to_string()
-    };
+    let result_text =
+        if let Some(structured) = obj.get("structured_output").filter(|v| !v.is_null()) {
+            serde_json::to_string(structured).unwrap_or_default()
+        } else {
+            // Fall back to the `result` string (used by non-schema responses
+            // that happen to come through this path).
+            obj.get("result")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
 
     if result_text.is_empty() {
         anyhow::bail!("claude CLI returned no structured_output or result\nOutput: {trimmed}");
     }
 
-    let is_error = obj.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let session_id = obj.get("session_id").and_then(|v| v.as_str()).map(std::string::ToString::to_string);
-    let total_cost_usd = obj.get("total_cost_usd").and_then(serde_json::Value::as_f64);
+    let is_error = obj
+        .get("is_error")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let session_id = obj
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+    let total_cost_usd = obj
+        .get("total_cost_usd")
+        .and_then(serde_json::Value::as_f64);
 
     Ok(LlmResponse {
         result: result_text,
@@ -877,9 +955,17 @@ fn parse_claude_p_schema_output(output: &str) -> Result<LlmResponse> {
 
     Ok(LlmResponse {
         result: stripped.to_string(),
-        total_cost_usd: obj.get("total_cost_usd").and_then(serde_json::Value::as_f64),
-        session_id: obj.get("session_id").and_then(|v| v.as_str()).map(String::from),
-        is_error: obj.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        total_cost_usd: obj
+            .get("total_cost_usd")
+            .and_then(serde_json::Value::as_f64),
+        session_id: obj
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        is_error: obj
+            .get("is_error")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1006,9 +1092,8 @@ impl LlmClient {
         }
 
         let bad_patterns = [
-            "type", "system", "hook", "subtype", "empty", "none",
-            "database", "api", "code", "app", "stuff", "things",
-            "service", "domain", "specific", "terms", "concepts",
+            "type", "system", "hook", "subtype", "empty", "none", "database", "api", "code", "app",
+            "stuff", "things", "service", "domain", "specific", "terms", "concepts",
         ];
 
         let concepts: Vec<String> = response
@@ -1073,9 +1158,8 @@ fn parse_session_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>
         .map_err(|e| anyhow!("Failed to parse session concepts JSON: {e}\nRaw: {cleaned}"))?;
 
     let bad_patterns = [
-        "type", "system", "hook", "subtype", "empty", "none",
-        "database", "api", "code", "app", "stuff", "things",
-        "service", "domain", "generic", "term", "concept",
+        "type", "system", "hook", "subtype", "empty", "none", "database", "api", "code", "app",
+        "stuff", "things", "service", "domain", "generic", "term", "concept",
     ];
 
     let out: Vec<ExtractedConcept> = parsed
@@ -1098,7 +1182,9 @@ fn parse_session_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>
             }
             let description = if description.len() > 220 {
                 let mut end = 220;
-                while !description.is_char_boundary(end) && end > 0 { end -= 1; }
+                while !description.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
                 format!("{}...", &description[..end])
             } else {
                 description

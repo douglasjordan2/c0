@@ -96,11 +96,16 @@ pub async fn fetch_url_no_cache(url: &str, source_type: &str) -> Result<FetchRes
     fetch_url_with_cache(url, source_type, 0).await
 }
 
-pub async fn fetch_url_with_cache(url: &str, source_type: &str, ttl_secs: u64) -> Result<FetchResult> {
+pub async fn fetch_url_with_cache(
+    url: &str,
+    source_type: &str,
+    ttl_secs: u64,
+) -> Result<FetchResult> {
     if ttl_secs > 0
-        && let Some(cached) = read_cache(url, ttl_secs) {
-            return Ok(cached);
-        }
+        && let Some(cached) = read_cache(url, ttl_secs)
+    {
+        return Ok(cached);
+    }
 
     let mut result = match source_type {
         "gdoc" => fetch_google_doc(url).await?,
@@ -126,10 +131,11 @@ pub fn clear_cache() -> Result<usize> {
     let mut count = 0;
     for entry in std::fs::read_dir(&cache_dir)? {
         if let Ok(entry) = entry
-            && entry.path().extension().is_some_and(|e| e == "json") {
-                std::fs::remove_file(entry.path())?;
-                count += 1;
-            }
+            && entry.path().extension().is_some_and(|e| e == "json")
+        {
+            std::fs::remove_file(entry.path())?;
+            count += 1;
+        }
     }
     Ok(count)
 }
@@ -149,11 +155,12 @@ pub fn clear_expired_cache(ttl_secs: u64) -> Result<usize> {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json")
             && let Ok(content) = std::fs::read_to_string(&path)
-                && let Ok(cache_entry) = serde_json::from_str::<CacheEntry>(&content)
-                    && now - cache_entry.timestamp > ttl_secs {
-                        std::fs::remove_file(&path)?;
-                        count += 1;
-                    }
+            && let Ok(cache_entry) = serde_json::from_str::<CacheEntry>(&content)
+            && now - cache_entry.timestamp > ttl_secs
+        {
+            std::fs::remove_file(&path)?;
+            count += 1;
+        }
     }
     Ok(count)
 }
@@ -163,7 +170,10 @@ pub fn detect_source_type(url: &str) -> &'static str {
         "gdoc"
     } else if url.contains("docs.google.com/spreadsheets") {
         "gsheet"
-    } else if url.contains("raw.githubusercontent.com") || url.ends_with(".txt") || url.ends_with(".md") {
+    } else if url.contains("raw.githubusercontent.com")
+        || url.ends_with(".txt")
+        || url.ends_with(".md")
+    {
         "raw"
     } else {
         "url"
@@ -179,9 +189,7 @@ async fn fetch_google_doc(url: &str) -> Result<FetchResult> {
     let doc_id = extract_google_doc_id(url)
         .ok_or_else(|| anyhow!("Could not extract Google Doc ID from URL: {url}"))?;
 
-    let export_url = format!(
-        "https://docs.google.com/document/d/{doc_id}/export?format=txt"
-    );
+    let export_url = format!("https://docs.google.com/document/d/{doc_id}/export?format=txt");
 
     let client = http_client_builder().build()?;
 
@@ -208,9 +216,7 @@ async fn fetch_google_sheet(url: &str) -> Result<FetchResult> {
     let doc_id = extract_google_doc_id(url)
         .ok_or_else(|| anyhow!("Could not extract Google Sheet ID from URL: {url}"))?;
 
-    let export_url = format!(
-        "https://docs.google.com/spreadsheets/d/{doc_id}/export?format=csv"
-    );
+    let export_url = format!("https://docs.google.com/spreadsheets/d/{doc_id}/export?format=csv");
 
     let client = http_client_builder().build()?;
 
@@ -334,7 +340,11 @@ async fn fetch_raw_url(url: &str) -> Result<FetchResult> {
     let resp = client.get(url).send().await?;
 
     if !resp.status().is_success() {
-        return Err(anyhow!("Failed to fetch URL (status {}): {}", resp.status(), url));
+        return Err(anyhow!(
+            "Failed to fetch URL (status {}): {}",
+            resp.status(),
+            url
+        ));
     }
 
     let content = resp.text().await?;
@@ -355,7 +365,11 @@ async fn fetch_generic_url(url: &str) -> Result<FetchResult> {
     let resp = client.get(url).send().await?;
 
     if !resp.status().is_success() {
-        return Err(anyhow!("Failed to fetch URL (status {}): {}", resp.status(), url));
+        return Err(anyhow!(
+            "Failed to fetch URL (status {}): {}",
+            resp.status(),
+            url
+        ));
     }
 
     let is_html = resp
@@ -381,10 +395,13 @@ async fn fetch_generic_url(url: &str) -> Result<FetchResult> {
 }
 
 fn extract_text_from_html(html: &str) -> String {
-    static SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid regex"));
-    static STYLE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("valid regex"));
+    static SCRIPT_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid regex"));
+    static STYLE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("valid regex"));
     static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").expect("valid regex"));
-    static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid regex"));
+    static WHITESPACE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\s+").expect("valid regex"));
 
     let script_re = &*SCRIPT_RE;
     let style_re = &*STYLE_RE;
@@ -430,9 +447,18 @@ mod tests {
 
     #[test]
     fn test_detect_source_type() {
-        assert_eq!(detect_source_type("https://docs.google.com/document/d/abc123/edit"), "gdoc");
-        assert_eq!(detect_source_type("https://docs.google.com/spreadsheets/d/abc123/edit"), "gsheet");
-        assert_eq!(detect_source_type("https://raw.githubusercontent.com/user/repo/main/file.md"), "raw");
+        assert_eq!(
+            detect_source_type("https://docs.google.com/document/d/abc123/edit"),
+            "gdoc"
+        );
+        assert_eq!(
+            detect_source_type("https://docs.google.com/spreadsheets/d/abc123/edit"),
+            "gsheet"
+        );
+        assert_eq!(
+            detect_source_type("https://raw.githubusercontent.com/user/repo/main/file.md"),
+            "raw"
+        );
         assert_eq!(detect_source_type("https://example.com/page.txt"), "raw");
         assert_eq!(detect_source_type("https://example.com/page"), "url");
     }
@@ -444,7 +470,9 @@ mod tests {
             Some("1abc123XYZ".to_string())
         );
         assert_eq!(
-            extract_google_doc_id("https://docs.google.com/document/d/1abc-123_XYZ/edit#heading=h.123"),
+            extract_google_doc_id(
+                "https://docs.google.com/document/d/1abc-123_XYZ/edit#heading=h.123"
+            ),
             Some("1abc-123_XYZ".to_string())
         );
     }

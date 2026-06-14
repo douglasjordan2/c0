@@ -18,7 +18,9 @@ impl TemporalQuery {
             return String::new();
         }
 
-        let as_of_dt = self.as_of.map_or_else(|| "datetime()".to_string(), |dt| dt.to_rfc3339());
+        let as_of_dt = self
+            .as_of
+            .map_or_else(|| "datetime()".to_string(), |dt| dt.to_rfc3339());
         let as_of_expr = if self.as_of.is_some() {
             format!("datetime('{as_of_dt}')")
         } else {
@@ -196,17 +198,19 @@ pub async fn ensure_event(
     reason: Option<&str>,
     namespace: &str,
 ) -> Result<bool> {
-    let mut result = graph.execute(
-        query(
-            "MERGE (e:Event {name: $name, namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MERGE (e:Event {name: $name, namespace: $namespace})
              ON CREATE SET e.reason = $reason, e.created_at = datetime()
              RETURN e.name AS name,
-                    CASE WHEN e.created_at = datetime() THEN true ELSE false END AS created"
+                    CASE WHEN e.created_at = datetime() THEN true ELSE false END AS created",
+            )
+            .param("name", name)
+            .param("namespace", namespace)
+            .param("reason", reason.unwrap_or("")),
         )
-        .param("name", name)
-        .param("namespace", namespace)
-        .param("reason", reason.unwrap_or(""))
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let created: bool = row.get("created").unwrap_or(false);
@@ -226,7 +230,10 @@ pub async fn add_concept(
     embedding: Option<&[f32]>,
     valid_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
-    let valid_at_clause = valid_at.map_or_else(|| "datetime()".to_string(), |dt| format!("datetime('{}')", dt.to_rfc3339()));
+    let valid_at_clause = valid_at.map_or_else(
+        || "datetime()".to_string(),
+        |dt| format!("datetime('{}')", dt.to_rfc3339()),
+    );
 
     let cypher = if embedding.is_some() {
         format!(
@@ -275,16 +282,18 @@ pub async fn update_concept_embedding(
 ) -> Result<bool> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $name, namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name, namespace: $namespace})
              SET c.embedding = $embedding
-             RETURN c.name AS name"
+             RETURN c.name AS name",
+            )
+            .param("name", name)
+            .param("namespace", namespace)
+            .param("embedding", embedding_vec),
         )
-        .param("name", name)
-        .param("namespace", namespace)
-        .param("embedding", embedding_vec)
-    ).await?;
+        .await?;
 
     Ok(result.next().await?.is_some())
 }
@@ -298,17 +307,19 @@ pub async fn update_concept_description(
 ) -> Result<bool> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $name, namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name, namespace: $namespace})
              SET c.description = $description, c.embedding = $embedding, c.updated_at = datetime()
-             RETURN c.name AS name"
+             RETURN c.name AS name",
+            )
+            .param("name", name)
+            .param("namespace", namespace)
+            .param("description", description)
+            .param("embedding", embedding_vec),
         )
-        .param("name", name)
-        .param("namespace", namespace)
-        .param("description", description)
-        .param("embedding", embedding_vec)
-    ).await?;
+        .await?;
 
     Ok(result.next().await?.is_some())
 }
@@ -318,15 +329,17 @@ pub async fn get_concept_description(
     name: &str,
     namespaces: &[String],
 ) -> Result<Option<String>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name})
              WHERE c.namespace IN $namespaces
-             RETURN c.description AS description"
+             RETURN c.description AS description",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("name", name)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let desc: String = row.get("description").unwrap_or_default();
@@ -345,15 +358,17 @@ pub async fn get_concept_embedding(
     name: &str,
     namespaces: &[String],
 ) -> Result<Option<Vec<f32>>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name})
              WHERE c.namespace IN $namespaces AND c.embedding IS NOT NULL
-             RETURN c.embedding AS embedding"
+             RETURN c.embedding AS embedding",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("name", name)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let embedding: Vec<f64> = row.get("embedding").unwrap_or_default();
@@ -371,15 +386,17 @@ pub async fn get_concepts_without_embeddings(
     graph: &Graph,
     namespaces: &[String],
 ) -> Result<Vec<(String, String)>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept)
              WHERE c.namespace IN $namespaces
                AND c.embedding IS NULL
-             RETURN c.name AS name, c.namespace AS namespace"
+             RETURN c.name AS name, c.namespace AS namespace",
+            )
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut concepts = Vec::new();
     while let Some(row) = result.next().await? {
@@ -390,7 +407,13 @@ pub async fn get_concepts_without_embeddings(
     Ok(concepts)
 }
 
-pub async fn relate(graph: &Graph, from: &str, rel_type: &str, to: &str, namespaces: &[String]) -> Result<()> {
+pub async fn relate(
+    graph: &Graph,
+    from: &str,
+    rel_type: &str,
+    to: &str,
+    namespaces: &[String],
+) -> Result<()> {
     let cypher = if rel_type == "HAS_PATCH" {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:KnowledgePatch {{name: $to}}) \
@@ -404,16 +427,24 @@ pub async fn relate(graph: &Graph, from: &str, rel_type: &str, to: &str, namespa
              CREATE (a)-[:{rel_type}]->(b)"
         )
     };
-    graph.run(
-        query(&cypher)
-            .param("from", from)
-            .param("to", to)
-            .param("namespaces", namespaces.to_vec())
-    ).await?;
+    graph
+        .run(
+            query(&cypher)
+                .param("from", from)
+                .param("to", to)
+                .param("namespaces", namespaces.to_vec()),
+        )
+        .await?;
     Ok(())
 }
 
-pub async fn traverse_temporal(graph: &Graph, start: &str, depth: u32, namespaces: &[String], temporal: &TemporalQuery) -> Result<Vec<String>> {
+pub async fn traverse_temporal(
+    graph: &Graph,
+    start: &str,
+    depth: u32,
+    namespaces: &[String],
+    temporal: &TemporalQuery,
+) -> Result<Vec<String>> {
     let temporal_clause = temporal.build_and_clause("connected");
 
     let cypher = format!(
@@ -421,11 +452,13 @@ pub async fn traverse_temporal(graph: &Graph, start: &str, depth: u32, namespace
          WHERE start.namespace IN $namespaces AND connected.namespace IN $namespaces{temporal_clause} \
          RETURN DISTINCT connected.name AS name"
     );
-    let mut result = graph.execute(
-        query(&cypher)
-            .param("start", start)
-            .param("namespaces", namespaces.to_vec())
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(&cypher)
+                .param("start", start)
+                .param("namespaces", namespaces.to_vec()),
+        )
+        .await?;
 
     let mut names = Vec::new();
     while let Some(row) = result.next().await? {
@@ -484,7 +517,10 @@ pub async fn add_patch(
         props.push("url: $url".to_string());
     }
 
-    let valid_at_str = valid_at.map_or_else(|| "datetime()".to_string(), |dt| format!("datetime('{}')", dt.to_rfc3339()));
+    let valid_at_str = valid_at.map_or_else(
+        || "datetime()".to_string(),
+        |dt| format!("datetime('{}')", dt.to_rfc3339()),
+    );
 
     props.push("created_at: datetime()".to_string());
     props.push(format!("valid_at: {valid_at_str}"));
@@ -499,37 +535,54 @@ pub async fn add_patch(
     graph.run(q).await?;
 
     if let Some(concept) = corrects {
-        graph.run(
-            query(
-                "MATCH (c:Concept {name: $concept}), (p:KnowledgePatch {name: $patch})
+        graph
+            .run(
+                query(
+                    "MATCH (c:Concept {name: $concept}), (p:KnowledgePatch {name: $patch})
                  WHERE c.namespace IN $namespaces
                  CREATE (c)-[:HAS_PATCH]->(p)
-                 CREATE (p)-[:CORRECTS]->(c)"
+                 CREATE (p)-[:CORRECTS]->(c)",
+                )
+                .param("concept", concept)
+                .param("patch", name)
+                .param(
+                    "namespaces",
+                    vec!["global".to_string(), namespace.to_string()],
+                ),
             )
-            .param("concept", concept)
-            .param("patch", name)
-            .param("namespaces", vec!["global".to_string(), namespace.to_string()])
-        ).await?;
+            .await?;
     }
 
     Ok(())
 }
 
-pub async fn link_patch(graph: &Graph, patch: &str, concept: &str, namespaces: &[String]) -> Result<()> {
-    graph.run(
-        query(
-            "MATCH (c:Concept {name: $concept}), (p:KnowledgePatch {name: $patch})
+pub async fn link_patch(
+    graph: &Graph,
+    patch: &str,
+    concept: &str,
+    namespaces: &[String],
+) -> Result<()> {
+    graph
+        .run(
+            query(
+                "MATCH (c:Concept {name: $concept}), (p:KnowledgePatch {name: $patch})
              WHERE c.namespace IN $namespaces
-             MERGE (c)-[:HAS_PATCH]->(p)"
+             MERGE (c)-[:HAS_PATCH]->(p)",
+            )
+            .param("concept", concept)
+            .param("patch", patch)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("concept", concept)
-        .param("patch", patch)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
     Ok(())
 }
 
-pub async fn get_patches_temporal(graph: &Graph, concept: &str, namespaces: &[String], temporal: &TemporalQuery) -> Result<Vec<Patch>> {
+pub async fn get_patches_temporal(
+    graph: &Graph,
+    concept: &str,
+    namespaces: &[String],
+    temporal: &TemporalQuery,
+) -> Result<Vec<Patch>> {
     let temporal_clause = temporal.build_and_clause("p");
 
     let cypher = format!(
@@ -546,59 +599,82 @@ pub async fn get_patches_temporal(graph: &Graph, concept: &str, namespaces: &[St
                 p.invalid_at AS invalid_at, p.expired_at AS expired_at"
     );
 
-    let mut result = graph.execute(
-        query(&cypher)
-            .param("name", concept)
-            .param("namespaces", namespaces.to_vec())
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(&cypher)
+                .param("name", concept)
+                .param("namespaces", namespaces.to_vec()),
+        )
+        .await?;
 
     let mut patches = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let file: Option<String> = row.get("file").ok();
         let content: Option<String> = row.get("content").ok();
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         let url: Option<String> = row.get("url").ok();
-        patches.push(Patch { name, file, content, namespace, url });
+        patches.push(Patch {
+            name,
+            file,
+            content,
+            namespace,
+            url,
+        });
     }
     Ok(patches)
 }
 
-pub async fn list_patches(graph: &Graph, namespaces: &[String]) -> Result<Vec<(String, Option<String>, Option<String>, String)>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (p:KnowledgePatch)
+pub async fn list_patches(
+    graph: &Graph,
+    namespaces: &[String],
+) -> Result<Vec<(String, Option<String>, Option<String>, String)>> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (p:KnowledgePatch)
              WHERE p.namespace IS NULL OR p.namespace IN $namespaces
              OPTIONAL MATCH (p)-[:CORRECTS]->(c:Concept)
              RETURN p.name AS name, p.patch_file AS file, c.name AS corrects,
-                    COALESCE(p.namespace, 'global') AS namespace"
+                    COALESCE(p.namespace, 'global') AS namespace",
+            )
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut patches = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let file: Option<String> = row.get("file").ok();
         let corrects: Option<String> = row.get("corrects").ok();
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         patches.push((name, file, corrects, namespace));
     }
     Ok(patches)
 }
 
-pub async fn search_concepts(graph: &Graph, term: &str, namespaces: &[String]) -> Result<Vec<String>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept)
+pub async fn search_concepts(
+    graph: &Graph,
+    term: &str,
+    namespaces: &[String],
+) -> Result<Vec<String>> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept)
              WHERE toLower(c.name) CONTAINS toLower($term) AND c.namespace IN $namespaces
              OPTIONAL MATCH (c)-[:HAS_PATCH]->(p:KnowledgePatch)
              RETURN c.name AS name, count(p) AS patch_count
-             ORDER BY patch_count DESC, size(c.name)"
+             ORDER BY patch_count DESC, size(c.name)",
+            )
+            .param("term", term)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("term", term)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut names = Vec::new();
     while let Some(row) = result.next().await? {
@@ -610,16 +686,20 @@ pub async fn search_concepts(graph: &Graph, term: &str, namespaces: &[String]) -
 }
 
 pub async fn migrate_add_global_namespace(graph: &Graph) -> Result<u64> {
-    graph.run(
-        query("MATCH (n) WHERE n.namespace IS NULL SET n.namespace = 'global'")
-    ).await?;
+    graph
+        .run(query(
+            "MATCH (n) WHERE n.namespace IS NULL SET n.namespace = 'global'",
+        ))
+        .await?;
     Ok(0)
 }
 
 pub async fn count_nodes_without_namespace(graph: &Graph) -> Result<u64> {
-    let mut result = graph.execute(
-        query("MATCH (n) WHERE n.namespace IS NULL RETURN count(n) AS count")
-    ).await?;
+    let mut result = graph
+        .execute(query(
+            "MATCH (n) WHERE n.namespace IS NULL RETURN count(n) AS count",
+        ))
+        .await?;
 
     if let Some(row) = result.next().await? {
         let count: i64 = row.get("count").unwrap_or(0);
@@ -629,13 +709,13 @@ pub async fn count_nodes_without_namespace(graph: &Graph) -> Result<u64> {
 }
 
 pub async fn count_nodes_without_temporal(graph: &Graph) -> Result<u64> {
-    let mut result = graph.execute(
-        query(
+    let mut result = graph
+        .execute(query(
             "MATCH (n)
              WHERE (n:Concept OR n:KnowledgePatch) AND n.valid_at IS NULL
-             RETURN count(n) AS count"
-        )
-    ).await?;
+             RETURN count(n) AS count",
+        ))
+        .await?;
 
     if let Some(row) = result.next().await? {
         let count: i64 = row.get("count").unwrap_or(0);
@@ -645,26 +725,34 @@ pub async fn count_nodes_without_temporal(graph: &Graph) -> Result<u64> {
 }
 
 pub async fn migrate_add_temporal_fields(graph: &Graph) -> Result<u64> {
-    graph.run(query(
-        "MATCH (n)
+    graph
+        .run(query(
+            "MATCH (n)
          WHERE (n:Concept OR n:KnowledgePatch) AND n.valid_at IS NULL
          SET n.created_at = COALESCE(n.created_at, datetime()),
              n.valid_at = datetime(),
              n.invalid_at = null,
-             n.expired_at = null"
-    )).await?;
+             n.expired_at = null",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE INDEX concept_valid_at IF NOT EXISTS FOR (c:Concept) ON (c.valid_at)"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE INDEX concept_valid_at IF NOT EXISTS FOR (c:Concept) ON (c.valid_at)",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE INDEX concept_invalid_at IF NOT EXISTS FOR (c:Concept) ON (c.invalid_at)"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE INDEX concept_invalid_at IF NOT EXISTS FOR (c:Concept) ON (c.invalid_at)",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE INDEX patch_valid_at IF NOT EXISTS FOR (p:KnowledgePatch) ON (p.valid_at)"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE INDEX patch_valid_at IF NOT EXISTS FOR (p:KnowledgePatch) ON (p.valid_at)",
+        ))
+        .await?;
 
     Ok(0)
 }
@@ -678,7 +766,10 @@ pub async fn invalidate_concept(
     reason: Option<&str>,
     namespaces: &[String],
 ) -> Result<Option<String>> {
-    let invalid_at_clause = invalid_at.map_or_else(|| "datetime()".to_string(), |dt| format!("datetime('{}')", dt.to_rfc3339()));
+    let invalid_at_clause = invalid_at.map_or_else(
+        || "datetime()".to_string(),
+        |dt| format!("datetime('{}')", dt.to_rfc3339()),
+    );
 
     let cypher = format!(
         "MATCH (c:Concept {{name: $name, namespace: $namespace}})
@@ -687,47 +778,56 @@ pub async fn invalidate_concept(
          RETURN c.name AS name, toString(c.invalid_at) AS invalid_at"
     );
 
-    let mut result = graph.execute(
-        query(&cypher)
-            .param("name", name)
-            .param("namespace", namespace)
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(&cypher)
+                .param("name", name)
+                .param("namespace", namespace),
+        )
+        .await?;
 
     if let Some(row) = result.next().await? {
         let invalid_at_str: String = row.get("invalid_at").unwrap_or_default();
 
         if let Some(by_name) = invalidated_by {
-            let target_exists = graph.execute(
-                query(
-                    "MATCH (target)
+            let target_exists = graph
+                .execute(
+                    query(
+                        "MATCH (target)
                      WHERE target.name = $by_name
                        AND (target:Concept OR target:Event OR target:KnowledgePatch)
                        AND (target.namespace IN $namespaces OR target.namespace IS NULL)
                      RETURN target.name AS name
-                     LIMIT 1"
+                     LIMIT 1",
+                    )
+                    .param("by_name", by_name)
+                    .param("namespaces", namespaces.to_vec()),
                 )
-                .param("by_name", by_name)
-                .param("namespaces", namespaces.to_vec())
-            ).await?.next().await?.is_some();
+                .await?
+                .next()
+                .await?
+                .is_some();
 
             if !target_exists {
                 ensure_event(graph, by_name, reason, namespace).await?;
             }
 
-            graph.run(
-                query(
-                    "MATCH (c:Concept {name: $name, namespace: $namespace})
+            graph
+                .run(
+                    query(
+                        "MATCH (c:Concept {name: $name, namespace: $namespace})
                      MATCH (target)
                      WHERE target.name = $by_name
                        AND (target:Concept OR target:Event OR target:KnowledgePatch)
                        AND (target.namespace IN $namespaces OR target.namespace IS NULL)
-                     MERGE (c)-[:INVALIDATED_BY]->(target)"
+                     MERGE (c)-[:INVALIDATED_BY]->(target)",
+                    )
+                    .param("name", name)
+                    .param("namespace", namespace)
+                    .param("by_name", by_name)
+                    .param("namespaces", namespaces.to_vec()),
                 )
-                .param("name", name)
-                .param("namespace", namespace)
-                .param("by_name", by_name)
-                .param("namespaces", namespaces.to_vec())
-            ).await?;
+                .await?;
         }
 
         Ok(Some(invalid_at_str))
@@ -745,7 +845,10 @@ pub async fn invalidate_patch(
     reason: Option<&str>,
     namespaces: &[String],
 ) -> Result<Option<String>> {
-    let invalid_at_clause = invalid_at.map_or_else(|| "datetime()".to_string(), |dt| format!("datetime('{}')", dt.to_rfc3339()));
+    let invalid_at_clause = invalid_at.map_or_else(
+        || "datetime()".to_string(),
+        |dt| format!("datetime('{}')", dt.to_rfc3339()),
+    );
 
     let cypher = format!(
         "MATCH (p:KnowledgePatch {{name: $name}})
@@ -754,48 +857,57 @@ pub async fn invalidate_patch(
          RETURN p.name AS name, toString(p.invalid_at) AS invalid_at"
     );
 
-    let mut result = graph.execute(
-        query(&cypher)
-            .param("name", name)
-            .param("namespace", namespace)
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(&cypher)
+                .param("name", name)
+                .param("namespace", namespace),
+        )
+        .await?;
 
     if let Some(row) = result.next().await? {
         let invalid_at_str: String = row.get("invalid_at").unwrap_or_default();
 
         if let Some(by_name) = invalidated_by {
-            let target_exists = graph.execute(
-                query(
-                    "MATCH (target)
+            let target_exists = graph
+                .execute(
+                    query(
+                        "MATCH (target)
                      WHERE target.name = $by_name
                        AND (target:Concept OR target:Event OR target:KnowledgePatch)
                        AND (target.namespace IN $namespaces OR target.namespace IS NULL)
                      RETURN target.name AS name
-                     LIMIT 1"
+                     LIMIT 1",
+                    )
+                    .param("by_name", by_name)
+                    .param("namespaces", namespaces.to_vec()),
                 )
-                .param("by_name", by_name)
-                .param("namespaces", namespaces.to_vec())
-            ).await?.next().await?.is_some();
+                .await?
+                .next()
+                .await?
+                .is_some();
 
             if !target_exists {
                 ensure_event(graph, by_name, reason, namespace).await?;
             }
 
-            graph.run(
-                query(
-                    "MATCH (p:KnowledgePatch {name: $name})
+            graph
+                .run(
+                    query(
+                        "MATCH (p:KnowledgePatch {name: $name})
                      WHERE p.namespace IS NULL OR p.namespace = $namespace
                      MATCH (target)
                      WHERE target.name = $by_name
                        AND (target:Concept OR target:Event OR target:KnowledgePatch)
                        AND (target.namespace IN $namespaces OR target.namespace IS NULL)
-                     MERGE (p)-[:INVALIDATED_BY]->(target)"
+                     MERGE (p)-[:INVALIDATED_BY]->(target)",
+                    )
+                    .param("name", name)
+                    .param("namespace", namespace)
+                    .param("by_name", by_name)
+                    .param("namespaces", namespaces.to_vec()),
                 )
-                .param("name", name)
-                .param("namespace", namespace)
-                .param("by_name", by_name)
-                .param("namespaces", namespaces.to_vec())
-            ).await?;
+                .await?;
         }
 
         Ok(Some(invalid_at_str))
@@ -811,7 +923,10 @@ pub async fn supersede_concept(
     namespaces: &[String],
     expired_at: Option<DateTime<Utc>>,
 ) -> Result<bool> {
-    let expired_at_clause = expired_at.map_or_else(|| "datetime()".to_string(), |dt| format!("datetime('{}')", dt.to_rfc3339()));
+    let expired_at_clause = expired_at.map_or_else(
+        || "datetime()".to_string(),
+        |dt| format!("datetime('{}')", dt.to_rfc3339()),
+    );
 
     let cypher = format!(
         "MATCH (old:Concept {{name: $old_name}}), (new:Concept {{name: $new_name}})
@@ -822,12 +937,14 @@ pub async fn supersede_concept(
          RETURN old.name AS old_name, new.name AS new_name"
     );
 
-    let mut result = graph.execute(
-        query(&cypher)
-            .param("old_name", old_name)
-            .param("new_name", new_name)
-            .param("namespaces", namespaces.to_vec())
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(&cypher)
+                .param("old_name", old_name)
+                .param("new_name", new_name)
+                .param("namespaces", namespaces.to_vec()),
+        )
+        .await?;
 
     Ok(result.next().await?.is_some())
 }
@@ -837,18 +954,20 @@ pub async fn get_supersession_chain(
     name: &str,
     namespaces: &[String],
 ) -> Result<Vec<(String, Option<String>)>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH path = (current:Concept {name: $name})-[:SUPERSEDES*0..10]->(old:Concept)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH path = (current:Concept {name: $name})-[:SUPERSEDES*0..10]->(old:Concept)
              WHERE current.namespace IN $namespaces
              UNWIND nodes(path) AS node
              WITH DISTINCT node.name AS name, node.expired_at AS exp_at
              RETURN name, toString(exp_at) AS expired_at
-             ORDER BY COALESCE(exp_at, datetime('9999-12-31')) DESC"
+             ORDER BY COALESCE(exp_at, datetime('9999-12-31')) DESC",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("name", name)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut chain = Vec::new();
     while let Some(row) = result.next().await? {
@@ -864,30 +983,35 @@ pub async fn get_invalidation_chain(
     name: &str,
     namespaces: &[String],
 ) -> Result<Vec<InvalidationRecord>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (n {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (n {name: $name})
              WHERE n.namespace IN $namespaces
                AND (n:Concept OR n:KnowledgePatch)
              OPTIONAL MATCH (n)-[:INVALIDATED_BY]->(cause)
              RETURN n.name AS name,
                     toString(n.invalid_at) AS invalid_at,
                     cause.name AS invalidated_by,
-                    cause.reason AS reason"
+                    cause.reason AS reason",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("name", name)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut records = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
-        let invalid_at: Option<String> = row.get("invalid_at").ok()
+        let invalid_at: Option<String> = row
+            .get("invalid_at")
+            .ok()
             .filter(|s: &String| !s.is_empty());
-        let invalidated_by: Option<String> = row.get("invalidated_by").ok()
+        let invalidated_by: Option<String> = row
+            .get("invalidated_by")
+            .ok()
             .filter(|s: &String| !s.is_empty());
-        let reason: Option<String> = row.get("reason").ok()
-            .filter(|s: &String| !s.is_empty());
+        let reason: Option<String> = row.get("reason").ok().filter(|s: &String| !s.is_empty());
 
         records.push(InvalidationRecord {
             name,
@@ -900,31 +1024,37 @@ pub async fn get_invalidation_chain(
 }
 
 pub async fn ensure_semantic_trigger_index(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE CONSTRAINT semantic_trigger_name IF NOT EXISTS
-         FOR (t:SemanticTrigger) REQUIRE t.name IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT semantic_trigger_name IF NOT EXISTS
+         FOR (t:SemanticTrigger) REQUIRE t.name IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE VECTOR INDEX semantic_trigger_embedding IF NOT EXISTS
+    graph
+        .run(query(
+            "CREATE VECTOR INDEX semantic_trigger_embedding IF NOT EXISTS
          FOR (t:SemanticTrigger)
          ON t.embedding
          OPTIONS {indexConfig: {
            `vector.dimensions`: 768,
            `vector.similarity_function`: 'cosine'
-         }}"
-    )).await?;
+         }}",
+        ))
+        .await?;
 
     Ok(())
 }
 
 pub async fn check_concept_duplicates(graph: &Graph) -> Result<Vec<(String, String, i64)>> {
-    let mut result = graph.execute(query(
-        "MATCH (c:Concept)
+    let mut result = graph
+        .execute(query(
+            "MATCH (c:Concept)
          WITH c.name AS name, c.namespace AS namespace, count(*) AS cnt
          WHERE cnt > 1
-         RETURN name, namespace, cnt"
-    )).await?;
+         RETURN name, namespace, cnt",
+        ))
+        .await?;
 
     let mut duplicates = Vec::new();
     while let Some(row) = result.next().await? {
@@ -939,7 +1069,10 @@ pub async fn check_concept_duplicates(graph: &Graph) -> Result<Vec<(String, Stri
 pub async fn ensure_concept_unique_constraint(graph: &Graph) -> Result<()> {
     let duplicates = check_concept_duplicates(graph).await?;
     if !duplicates.is_empty() {
-        eprintln!("⚠️  Found {} duplicate concept(s) - constraint not created:", duplicates.len());
+        eprintln!(
+            "⚠️  Found {} duplicate concept(s) - constraint not created:",
+            duplicates.len()
+        );
         for (name, namespace, cnt) in &duplicates {
             eprintln!("   - {namespace}:{name} ({cnt} copies)");
         }
@@ -947,40 +1080,48 @@ pub async fn ensure_concept_unique_constraint(graph: &Graph) -> Result<()> {
         return Ok(());
     }
 
-    graph.run(query(
-        "CREATE CONSTRAINT concept_name_namespace IF NOT EXISTS
-         FOR (c:Concept) REQUIRE (c.name, c.namespace) IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT concept_name_namespace IF NOT EXISTS
+         FOR (c:Concept) REQUIRE (c.name, c.namespace) IS UNIQUE",
+        ))
+        .await?;
     Ok(())
 }
 
 pub async fn ensure_concept_embedding_index(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE VECTOR INDEX concept_embedding IF NOT EXISTS
+    graph
+        .run(query(
+            "CREATE VECTOR INDEX concept_embedding IF NOT EXISTS
          FOR (c:Concept)
          ON c.embedding
          OPTIONS {indexConfig: {
            `vector.dimensions`: 768,
            `vector.similarity_function`: 'cosine'
-         }}"
-    )).await?;
+         }}",
+        ))
+        .await?;
 
     Ok(())
 }
 
 pub async fn ensure_concept_fulltext_index(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE FULLTEXT INDEX concept_fulltext IF NOT EXISTS
-         FOR (c:Concept) ON EACH [c.name, c.description]"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE FULLTEXT INDEX concept_fulltext IF NOT EXISTS
+         FOR (c:Concept) ON EACH [c.name, c.description]",
+        ))
+        .await?;
     Ok(())
 }
 
 pub async fn ensure_patch_fulltext_index(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE FULLTEXT INDEX patch_fulltext IF NOT EXISTS
-         FOR (p:KnowledgePatch) ON EACH [p.name, p.content]"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE FULLTEXT INDEX patch_fulltext IF NOT EXISTS
+         FOR (p:KnowledgePatch) ON EACH [p.name, p.content]",
+        ))
+        .await?;
     Ok(())
 }
 
@@ -1001,34 +1142,38 @@ pub async fn add_semantic_trigger(
 ) -> Result<()> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    graph.run(
-        query(
-            "MERGE (t:SemanticTrigger {name: $name, namespace: $namespace})
+    graph
+        .run(
+            query(
+                "MERGE (t:SemanticTrigger {name: $name, namespace: $namespace})
              SET t.description = $description,
                  t.embedding = $embedding,
                  t.threshold = $threshold,
-                 t.updated_at = datetime()"
+                 t.updated_at = datetime()",
+            )
+            .param("name", name)
+            .param("description", description)
+            .param("embedding", embedding_vec)
+            .param("namespace", namespace)
+            .param("threshold", threshold),
         )
-        .param("name", name)
-        .param("description", description)
-        .param("embedding", embedding_vec)
-        .param("namespace", namespace)
-        .param("threshold", threshold)
-    ).await?;
+        .await?;
 
     Ok(())
 }
 
 pub async fn remove_semantic_trigger(graph: &Graph, name: &str, namespace: &str) -> Result<bool> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (t:SemanticTrigger {name: $name, namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (t:SemanticTrigger {name: $name, namespace: $namespace})
              DELETE t
-             RETURN count(t) AS deleted"
+             RETURN count(t) AS deleted",
+            )
+            .param("name", name)
+            .param("namespace", namespace),
         )
-        .param("name", name)
-        .param("namespace", namespace)
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let deleted: i64 = row.get("deleted").unwrap_or(0);
@@ -1037,23 +1182,30 @@ pub async fn remove_semantic_trigger(graph: &Graph, name: &str, namespace: &str)
     Ok(false)
 }
 
-pub async fn list_semantic_triggers(graph: &Graph, namespaces: &[String]) -> Result<Vec<SemanticTrigger>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (t:SemanticTrigger)
+pub async fn list_semantic_triggers(
+    graph: &Graph,
+    namespaces: &[String],
+) -> Result<Vec<SemanticTrigger>> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (t:SemanticTrigger)
              WHERE t.namespace IN $namespaces
              RETURN t.name AS name, t.description AS description,
                     t.namespace AS namespace, t.threshold AS threshold
-             ORDER BY t.name"
+             ORDER BY t.name",
+            )
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut triggers = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let description: String = row.get("description").unwrap_or_default();
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         let threshold: Option<f32> = row.get("threshold").ok();
 
         triggers.push(SemanticTrigger {
@@ -1076,27 +1228,31 @@ pub async fn find_similar_triggers(
 ) -> Result<Vec<SemanticTrigger>> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    let mut result = graph.execute(
-        query(
-            "CALL db.index.vector.queryNodes('semantic_trigger_embedding', 10, $embedding)
+    let mut result = graph
+        .execute(
+            query(
+                "CALL db.index.vector.queryNodes('semantic_trigger_embedding', 10, $embedding)
              YIELD node, score
              WHERE node.namespace IN $namespaces
                AND score >= $floor_threshold
              RETURN node.name AS name, node.description AS description,
                     node.namespace AS namespace, node.threshold AS trigger_threshold,
                     score AS similarity
-             ORDER BY score DESC"
+             ORDER BY score DESC",
+            )
+            .param("embedding", embedding_vec)
+            .param("floor_threshold", f64::from(floor_threshold))
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("embedding", embedding_vec)
-        .param("floor_threshold", f64::from(floor_threshold))
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut triggers = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let description: String = row.get("description").unwrap_or_default();
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         let trigger_threshold: Option<f32> = row.get("trigger_threshold").ok();
         let similarity: f64 = row.get("similarity").unwrap_or(0.0);
 
@@ -1119,18 +1275,20 @@ pub async fn get_related_concept_names(
     name: &str,
     namespaces: &[String],
 ) -> Result<Vec<String>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name})
              WHERE c.namespace IN $namespaces
              OPTIONAL MATCH (c)-[:RELATES_TO|DEPENDS_ON|USES]-(related:Concept)
              WHERE related.namespace IN $namespaces
              RETURN DISTINCT related.name AS name
-             LIMIT 10"
+             LIMIT 10",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("name", name)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut names = Vec::new();
     while let Some(row) = result.next().await? {
@@ -1147,7 +1305,14 @@ pub async fn find_similar_concepts(
     threshold: f32,
     namespaces: &[String],
 ) -> Result<Vec<(String, f32)>> {
-    find_similar_concepts_temporal(graph, embedding, threshold, namespaces, &TemporalQuery::default()).await
+    find_similar_concepts_temporal(
+        graph,
+        embedding,
+        threshold,
+        namespaces,
+        &TemporalQuery::default(),
+    )
+    .await
 }
 
 pub async fn find_similar_concepts_temporal(
@@ -1169,12 +1334,14 @@ pub async fn find_similar_concepts_temporal(
          ORDER BY score DESC"
     );
 
-    let result = graph.execute(
-        query(&cypher)
-            .param("embedding", embedding_vec)
-            .param("threshold", f64::from(threshold))
-            .param("namespaces", namespaces.to_vec())
-    ).await;
+    let result = graph
+        .execute(
+            query(&cypher)
+                .param("embedding", embedding_vec)
+                .param("threshold", f64::from(threshold))
+                .param("namespaces", namespaces.to_vec()),
+        )
+        .await;
 
     match result {
         Ok(mut rows) => {
@@ -1186,25 +1353,29 @@ pub async fn find_similar_concepts_temporal(
             }
             Ok(concepts)
         }
-        Err(_) => Ok(Vec::new())
+        Err(_) => Ok(Vec::new()),
     }
 }
 
 pub async fn ensure_live_source_index(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE CONSTRAINT live_source_name IF NOT EXISTS
-         FOR (s:LiveSource) REQUIRE (s.name, s.namespace) IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT live_source_name IF NOT EXISTS
+         FOR (s:LiveSource) REQUIRE (s.name, s.namespace) IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE VECTOR INDEX live_source_embedding IF NOT EXISTS
+    graph
+        .run(query(
+            "CREATE VECTOR INDEX live_source_embedding IF NOT EXISTS
          FOR (s:LiveSource)
          ON s.embedding
          OPTIONS {indexConfig: {
            `vector.dimensions`: 768,
            `vector.similarity_function`: 'cosine'
-         }}"
-    )).await?;
+         }}",
+        ))
+        .await?;
 
     Ok(())
 }
@@ -1238,19 +1409,22 @@ pub async fn add_live_source(
              s.created_at = COALESCE(s.created_at, datetime())"
     };
 
-    graph.run(
-        query(cypher)
-            .param("name", name)
-            .param("url", url)
-            .param("source_type", source_type)
-            .param("namespace", namespace)
-            .param("linked_concept", linked_concept.unwrap_or(""))
-            .param("embedding", embedding_vec)
-    ).await?;
+    graph
+        .run(
+            query(cypher)
+                .param("name", name)
+                .param("url", url)
+                .param("source_type", source_type)
+                .param("namespace", namespace)
+                .param("linked_concept", linked_concept.unwrap_or(""))
+                .param("embedding", embedding_vec),
+        )
+        .await?;
 
     if let Some(concept) = linked_concept
-        && !concept.is_empty() {
-            graph.run(
+        && !concept.is_empty()
+    {
+        graph.run(
                 query(
                     "MATCH (c:Concept {name: $concept}), (s:LiveSource {name: $source, namespace: $namespace})
                      WHERE c.namespace IN $namespaces
@@ -1261,7 +1435,7 @@ pub async fn add_live_source(
                 .param("namespace", namespace)
                 .param("namespaces", vec!["global".to_string(), namespace.to_string()])
             ).await?;
-        }
+    }
 
     Ok(())
 }
@@ -1274,16 +1448,18 @@ pub async fn update_live_source_embedding(
 ) -> Result<bool> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    let mut result = graph.execute(
-        query(
-            "MATCH (s:LiveSource {name: $name, namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (s:LiveSource {name: $name, namespace: $namespace})
              SET s.embedding = $embedding, s.last_indexed = datetime()
-             RETURN s.name AS name"
+             RETURN s.name AS name",
+            )
+            .param("name", name)
+            .param("namespace", namespace)
+            .param("embedding", embedding_vec),
         )
-        .param("name", name)
-        .param("namespace", namespace)
-        .param("embedding", embedding_vec)
-    ).await?;
+        .await?;
 
     Ok(result.next().await?.is_some())
 }
@@ -1293,25 +1469,31 @@ pub async fn get_live_source(
     name: &str,
     namespaces: &[String],
 ) -> Result<Option<LiveSource>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (s:LiveSource {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (s:LiveSource {name: $name})
              WHERE s.namespace IN $namespaces
              RETURN s.name AS name, s.url AS url, s.source_type AS source_type,
                     s.namespace AS namespace, s.last_indexed AS last_indexed,
-                    s.linked_concept AS linked_concept"
+                    s.linked_concept AS linked_concept",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("name", name)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let url: String = row.get("url").unwrap_or_default();
         let source_type: String = row.get("source_type").unwrap_or_else(|_| "url".to_string());
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         let last_indexed: Option<String> = row.get("last_indexed").ok();
-        let linked_concept: Option<String> = row.get("linked_concept").ok()
+        let linked_concept: Option<String> = row
+            .get("linked_concept")
+            .ok()
             .filter(|s: &String| !s.is_empty());
 
         Ok(Some(LiveSource {
@@ -1328,26 +1510,32 @@ pub async fn get_live_source(
 }
 
 pub async fn list_live_sources(graph: &Graph, namespaces: &[String]) -> Result<Vec<LiveSource>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (s:LiveSource)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (s:LiveSource)
              WHERE s.namespace IN $namespaces
              RETURN s.name AS name, s.url AS url, s.source_type AS source_type,
                     s.namespace AS namespace, s.last_indexed AS last_indexed,
                     s.linked_concept AS linked_concept
-             ORDER BY s.name"
+             ORDER BY s.name",
+            )
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut sources = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let url: String = row.get("url").unwrap_or_default();
         let source_type: String = row.get("source_type").unwrap_or_else(|_| "url".to_string());
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         let last_indexed: Option<String> = row.get("last_indexed").ok();
-        let linked_concept: Option<String> = row.get("linked_concept").ok()
+        let linked_concept: Option<String> = row
+            .get("linked_concept")
+            .ok()
             .filter(|s: &String| !s.is_empty());
 
         sources.push(LiveSource {
@@ -1363,15 +1551,17 @@ pub async fn list_live_sources(graph: &Graph, namespaces: &[String]) -> Result<V
 }
 
 pub async fn remove_live_source(graph: &Graph, name: &str, namespace: &str) -> Result<bool> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (s:LiveSource {name: $name, namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (s:LiveSource {name: $name, namespace: $namespace})
              DETACH DELETE s
-             RETURN count(s) AS deleted"
+             RETURN count(s) AS deleted",
+            )
+            .param("name", name)
+            .param("namespace", namespace),
         )
-        .param("name", name)
-        .param("namespace", namespace)
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let deleted: i64 = row.get("deleted").unwrap_or(0);
@@ -1389,22 +1579,24 @@ pub async fn find_similar_live_sources(
 ) -> Result<Vec<(LiveSource, f32)>> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    let result = graph.execute(
-        query(
-            "CALL db.index.vector.queryNodes('live_source_embedding', $limit, $embedding)
+    let result = graph
+        .execute(
+            query(
+                "CALL db.index.vector.queryNodes('live_source_embedding', $limit, $embedding)
              YIELD node, score
              WHERE node.namespace IN $namespaces
                AND score >= $threshold
              RETURN node.name AS name, node.url AS url, node.source_type AS source_type,
                     node.namespace AS namespace, node.last_indexed AS last_indexed,
                     node.linked_concept AS linked_concept, score AS similarity
-             ORDER BY score DESC"
+             ORDER BY score DESC",
+            )
+            .param("embedding", embedding_vec)
+            .param("threshold", f64::from(threshold))
+            .param("namespaces", namespaces.to_vec())
+            .param("limit", limit as i64),
         )
-        .param("embedding", embedding_vec)
-        .param("threshold", f64::from(threshold))
-        .param("namespaces", namespaces.to_vec())
-        .param("limit", limit as i64)
-    ).await;
+        .await;
 
     match result {
         Ok(mut rows) => {
@@ -1412,10 +1604,15 @@ pub async fn find_similar_live_sources(
             while let Some(row) = rows.next().await? {
                 let name: String = row.get("name").unwrap_or_default();
                 let url: String = row.get("url").unwrap_or_default();
-                let source_type: String = row.get("source_type").unwrap_or_else(|_| "url".to_string());
-                let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+                let source_type: String =
+                    row.get("source_type").unwrap_or_else(|_| "url".to_string());
+                let namespace: String = row
+                    .get("namespace")
+                    .unwrap_or_else(|_| "global".to_string());
                 let last_indexed: Option<String> = row.get("last_indexed").ok();
-                let linked_concept: Option<String> = row.get("linked_concept").ok()
+                let linked_concept: Option<String> = row
+                    .get("linked_concept")
+                    .ok()
                     .filter(|s: &String| !s.is_empty());
                 let similarity: f64 = row.get("similarity").unwrap_or(0.0);
 
@@ -1433,7 +1630,7 @@ pub async fn find_similar_live_sources(
             }
             Ok(sources)
         }
-        Err(_) => Ok(Vec::new())
+        Err(_) => Ok(Vec::new()),
     }
 }
 
@@ -1442,26 +1639,32 @@ pub async fn get_live_sources_for_concept(
     concept: &str,
     namespaces: &[String],
 ) -> Result<Vec<LiveSource>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $concept})-[:HAS_LIVE_SOURCE]->(s:LiveSource)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $concept})-[:HAS_LIVE_SOURCE]->(s:LiveSource)
              WHERE c.namespace IN $namespaces
              RETURN s.name AS name, s.url AS url, s.source_type AS source_type,
                     s.namespace AS namespace, s.last_indexed AS last_indexed,
-                    s.linked_concept AS linked_concept"
+                    s.linked_concept AS linked_concept",
+            )
+            .param("concept", concept)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("concept", concept)
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut sources = Vec::new();
     while let Some(row) = result.next().await? {
         let name: String = row.get("name").unwrap_or_default();
         let url: String = row.get("url").unwrap_or_default();
         let source_type: String = row.get("source_type").unwrap_or_else(|_| "url".to_string());
-        let namespace: String = row.get("namespace").unwrap_or_else(|_| "global".to_string());
+        let namespace: String = row
+            .get("namespace")
+            .unwrap_or_else(|_| "global".to_string());
         let last_indexed: Option<String> = row.get("last_indexed").ok();
-        let linked_concept: Option<String> = row.get("linked_concept").ok()
+        let linked_concept: Option<String> = row
+            .get("linked_concept")
+            .ok()
             .filter(|s: &String| !s.is_empty());
 
         sources.push(LiveSource {
@@ -1490,29 +1693,33 @@ pub async fn move_concept(
     to_namespace: &str,
     include_patches: bool,
 ) -> Result<Option<MoveResult>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name})
              WHERE c.namespace <> $to_namespace
-             RETURN c.namespace AS old_namespace"
+             RETURN c.namespace AS old_namespace",
+            )
+            .param("name", name)
+            .param("to_namespace", to_namespace),
         )
-        .param("name", name)
-        .param("to_namespace", to_namespace)
-    ).await?;
+        .await?;
 
     let old_namespace: String = match result.next().await? {
         Some(row) => row.get("old_namespace").unwrap_or_default(),
         None => return Ok(None),
     };
 
-    graph.run(
-        query(
-            "MATCH (c:Concept {name: $name})
-             SET c.namespace = $to_namespace"
+    graph
+        .run(
+            query(
+                "MATCH (c:Concept {name: $name})
+             SET c.namespace = $to_namespace",
+            )
+            .param("name", name)
+            .param("to_namespace", to_namespace),
         )
-        .param("name", name)
-        .param("to_namespace", to_namespace)
-    ).await?;
+        .await?;
 
     let patches_moved = if include_patches {
         let mut patch_result = graph.execute(
@@ -1527,7 +1734,9 @@ pub async fn move_concept(
             .param("old_namespace", old_namespace.clone())
         ).await?;
 
-        patch_result.next().await?
+        patch_result
+            .next()
+            .await?
             .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
     } else {
         0
@@ -1550,23 +1759,28 @@ pub async fn move_concepts_by_prefix(
 ) -> Result<(i64, i64)> {
     let pattern = format!("(?i)^{}[-_:].*", regex::escape(prefix));
 
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {namespace: $from_namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {namespace: $from_namespace})
              WHERE c.name =~ $pattern
              SET c.namespace = $to_namespace
-             RETURN count(c) AS moved"
+             RETURN count(c) AS moved",
+            )
+            .param("from_namespace", from_namespace)
+            .param("to_namespace", to_namespace)
+            .param("pattern", pattern.clone()),
         )
-        .param("from_namespace", from_namespace)
-        .param("to_namespace", to_namespace)
-        .param("pattern", pattern.clone())
-    ).await?;
+        .await?;
 
-    let concepts_moved: i64 = result.next().await?
+    let concepts_moved: i64 = result
+        .next()
+        .await?
         .map_or(0, |r| r.get("moved").unwrap_or(0));
 
-    let patches_moved = if include_patches {
-        let mut patch_result = graph.execute(
+    let patches_moved =
+        if include_patches {
+            let mut patch_result = graph.execute(
             query(
                 "MATCH (c:Concept {namespace: $to_namespace})-[:HAS_PATCH]->(p:KnowledgePatch)
                  WHERE c.name =~ $pattern AND p.namespace = $from_namespace
@@ -1578,11 +1792,13 @@ pub async fn move_concepts_by_prefix(
             .param("pattern", pattern.clone())
         ).await?;
 
-        patch_result.next().await?
-            .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
-    } else {
-        0
-    };
+            patch_result
+                .next()
+                .await?
+                .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
+        } else {
+            0
+        };
 
     Ok((concepts_moved, patches_moved))
 }
@@ -1594,16 +1810,18 @@ pub async fn list_concepts_by_prefix(
 ) -> Result<Vec<String>> {
     let pattern = format!("(?i)^{}[-_:].*", regex::escape(prefix));
 
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept {namespace: $namespace})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {namespace: $namespace})
              WHERE c.name =~ $pattern
              RETURN c.name AS name
-             ORDER BY c.name"
+             ORDER BY c.name",
+            )
+            .param("namespace", namespace)
+            .param("pattern", pattern),
         )
-        .param("namespace", namespace)
-        .param("pattern", pattern)
-    ).await?;
+        .await?;
 
     let mut names = Vec::new();
     while let Some(row) = result.next().await? {
@@ -1632,21 +1850,23 @@ pub async fn search_concepts_semantic(
 ) -> Result<Vec<SearchResult>> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
 
-    let result = graph.execute(
-        query(
-            "CALL db.index.vector.queryNodes('concept_embedding', $limit, $embedding)
+    let result = graph
+        .execute(
+            query(
+                "CALL db.index.vector.queryNodes('concept_embedding', $limit, $embedding)
              YIELD node, score
              WHERE node.namespace IN $namespaces
                AND score >= $threshold
              RETURN node.name AS name, node.namespace AS namespace,
                     node.description AS description, score AS similarity
-             ORDER BY score DESC"
+             ORDER BY score DESC",
+            )
+            .param("embedding", embedding_vec)
+            .param("limit", limit as i64)
+            .param("threshold", f64::from(threshold))
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("embedding", embedding_vec)
-        .param("limit", limit as i64)
-        .param("threshold", f64::from(threshold))
-        .param("namespaces", namespaces.to_vec())
-    ).await;
+        .await;
 
     match result {
         Ok(mut rows) => {
@@ -1654,7 +1874,9 @@ pub async fn search_concepts_semantic(
             while let Some(row) = rows.next().await? {
                 let name: String = row.get("name").unwrap_or_default();
                 let namespace: String = row.get("namespace").unwrap_or_default();
-                let description: Option<String> = row.get("description").ok()
+                let description: Option<String> = row
+                    .get("description")
+                    .ok()
                     .filter(|s: &String| !s.is_empty());
                 let similarity: f64 = row.get("similarity").unwrap_or(0.0);
                 results.push(SearchResult {
@@ -1666,12 +1888,15 @@ pub async fn search_concepts_semantic(
             }
             Ok(results)
         }
-        Err(_) => Ok(Vec::new())
+        Err(_) => Ok(Vec::new()),
     }
 }
 
 fn sanitize_lucene_query(input: &str) -> String {
-    let special = ['+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\', '/'];
+    let special = [
+        '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\',
+        '/',
+    ];
     let mut out = String::with_capacity(input.len() * 2);
     for ch in input.chars() {
         if special.contains(&ch) {
@@ -1690,7 +1915,10 @@ fn build_fulltext_query(input: &str) -> String {
         format!("name:{t}^3 OR description:{t} OR name:{t}~")
     } else {
         let phrase = terms.join(" ");
-        let boosted: Vec<String> = terms.iter().map(|t| format!("name:{t}^3 OR description:{t}")).collect();
+        let boosted: Vec<String> = terms
+            .iter()
+            .map(|t| format!("name:{t}^3 OR description:{t}"))
+            .collect();
         format!("\"{}\"^5 OR {}", phrase, boosted.join(" OR "))
     }
 }
@@ -1703,19 +1931,21 @@ pub async fn search_concepts_fulltext(
 ) -> Result<Vec<SearchResult>> {
     let ft_query = build_fulltext_query(query_text);
 
-    let result = graph.execute(
-        query(
-            "CALL db.index.fulltext.queryNodes('concept_fulltext', $query, {limit: $limit})
+    let result = graph
+        .execute(
+            query(
+                "CALL db.index.fulltext.queryNodes('concept_fulltext', $query, {limit: $limit})
              YIELD node, score
              WHERE node.namespace IN $namespaces
              RETURN node.name AS name, node.namespace AS namespace,
                     node.description AS description, score AS similarity
-             ORDER BY score DESC"
+             ORDER BY score DESC",
+            )
+            .param("query", ft_query)
+            .param("limit", limit as i64)
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("query", ft_query)
-        .param("limit", limit as i64)
-        .param("namespaces", namespaces.to_vec())
-    ).await;
+        .await;
 
     match result {
         Ok(mut rows) => {
@@ -1723,7 +1953,9 @@ pub async fn search_concepts_fulltext(
             while let Some(row) = rows.next().await? {
                 let name: String = row.get("name").unwrap_or_default();
                 let namespace: String = row.get("namespace").unwrap_or_default();
-                let description: Option<String> = row.get("description").ok()
+                let description: Option<String> = row
+                    .get("description")
+                    .ok()
                     .filter(|s: &String| !s.is_empty());
                 let similarity: f64 = row.get("similarity").unwrap_or(0.0);
                 results.push(SearchResult {
@@ -1735,7 +1967,7 @@ pub async fn search_concepts_fulltext(
             }
             Ok(results)
         }
-        Err(_) => Ok(Vec::new())
+        Err(_) => Ok(Vec::new()),
     }
 }
 
@@ -1793,7 +2025,11 @@ fn reciprocal_rank_fusion(
             similarity: score,
         })
         .collect();
-    fused.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+    fused.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     fused
 }
 
@@ -1805,8 +2041,16 @@ pub async fn search_hybrid(
     namespaces: &[String],
     config: &HybridSearchConfig,
 ) -> Result<Vec<SearchResult>> {
-    let ft_results = search_concepts_fulltext(graph, query_text, config.fulltext_limit, namespaces).await?;
-    let vec_results = search_concepts_semantic(graph, embedding, config.vector_limit, config.vector_threshold, namespaces).await?;
+    let ft_results =
+        search_concepts_fulltext(graph, query_text, config.fulltext_limit, namespaces).await?;
+    let vec_results = search_concepts_semantic(
+        graph,
+        embedding,
+        config.vector_limit,
+        config.vector_threshold,
+        namespaces,
+    )
+    .await?;
     let mut fused = reciprocal_rank_fusion(&ft_results, &vec_results, config.alpha, config.k);
     fused.truncate(limit);
     Ok(fused)
@@ -1820,17 +2064,27 @@ pub async fn search_hybrid_temporal(
     temporal: &TemporalQuery,
     config: &HybridSearchConfig,
 ) -> Result<Vec<(String, f32)>> {
-    let ft_results = search_concepts_fulltext(graph, query_text, config.fulltext_limit, namespaces).await?;
+    let ft_results =
+        search_concepts_fulltext(graph, query_text, config.fulltext_limit, namespaces).await?;
     let vec_raw = find_similar_concepts_temporal(
-        graph, embedding, config.vector_threshold, namespaces, temporal,
-    ).await.unwrap_or_default();
+        graph,
+        embedding,
+        config.vector_threshold,
+        namespaces,
+        temporal,
+    )
+    .await
+    .unwrap_or_default();
 
-    let vec_results: Vec<SearchResult> = vec_raw.iter().map(|(name, score)| SearchResult {
-        name: name.clone(),
-        namespace: String::new(),
-        description: None,
-        similarity: *score,
-    }).collect();
+    let vec_results: Vec<SearchResult> = vec_raw
+        .iter()
+        .map(|(name, score)| SearchResult {
+            name: name.clone(),
+            namespace: String::new(),
+            description: None,
+            similarity: *score,
+        })
+        .collect();
 
     let fused = reciprocal_rank_fusion(&ft_results, &vec_results, config.alpha, config.k);
     Ok(fused.into_iter().map(|r| (r.name, r.similarity)).collect())
@@ -1840,16 +2094,18 @@ pub async fn find_orphaned_concepts(
     graph: &Graph,
     namespaces: &[String],
 ) -> Result<Vec<(String, String)>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (c:Concept)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept)
              WHERE c.namespace IN $namespaces
              AND NOT (c)-[]-()
              RETURN c.name AS name, c.namespace AS namespace
-             ORDER BY c.name"
+             ORDER BY c.name",
+            )
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut orphans = Vec::new();
     while let Some(row) = result.next().await? {
@@ -1860,16 +2116,14 @@ pub async fn find_orphaned_concepts(
     Ok(orphans)
 }
 
-pub async fn count_concepts_by_namespace(
-    graph: &Graph,
-) -> Result<Vec<(String, i64)>> {
-    let mut result = graph.execute(
-        query(
+pub async fn count_concepts_by_namespace(graph: &Graph) -> Result<Vec<(String, i64)>> {
+    let mut result = graph
+        .execute(query(
             "MATCH (c:Concept)
              RETURN c.namespace AS namespace, count(c) AS count
-             ORDER BY count DESC"
-        )
-    ).await?;
+             ORDER BY count DESC",
+        ))
+        .await?;
 
     let mut counts = Vec::new();
     while let Some(row) = result.next().await? {
@@ -1884,16 +2138,18 @@ pub async fn find_patches_with_files(
     graph: &Graph,
     namespaces: &[String],
 ) -> Result<Vec<(String, String, String)>> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (p:KnowledgePatch)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (p:KnowledgePatch)
              WHERE (p.namespace IS NULL OR p.namespace IN $namespaces)
                AND p.patch_file IS NOT NULL AND p.patch_file <> ''
              RETURN p.name AS name, COALESCE(p.namespace, 'global') AS namespace,
-                    p.patch_file AS file_path"
+                    p.patch_file AS file_path",
+            )
+            .param("namespaces", namespaces.to_vec()),
         )
-        .param("namespaces", namespaces.to_vec())
-    ).await?;
+        .await?;
 
     let mut patches = Vec::new();
     while let Some(row) = result.next().await? {
@@ -1910,16 +2166,18 @@ pub async fn clear_patch_file_reference(
     patch_name: &str,
     namespace: &str,
 ) -> Result<bool> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (p:KnowledgePatch {name: $name})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (p:KnowledgePatch {name: $name})
              WHERE p.namespace IS NULL OR p.namespace = $namespace
              REMOVE p.patch_file
-             RETURN p.name AS name"
+             RETURN p.name AS name",
+            )
+            .param("name", patch_name)
+            .param("namespace", namespace),
         )
-        .param("name", patch_name)
-        .param("namespace", namespace)
-    ).await?;
+        .await?;
 
     Ok(result.next().await?.is_some())
 }
@@ -1943,14 +2201,11 @@ pub async fn export_nodes_by_label(
         )
     };
 
-    let ns = namespace_filter
-        .map(|ns| ns.to_vec())
-        .unwrap_or_default();
+    let ns = namespace_filter.map(|ns| ns.to_vec()).unwrap_or_default();
 
-    let mut result = graph.execute(
-        query(&cypher)
-            .param("namespaces", ns)
-    ).await?;
+    let mut result = graph
+        .execute(query(&cypher).param("namespaces", ns))
+        .await?;
 
     let mut nodes = Vec::new();
     while let Some(row) = result.next().await? {
@@ -2005,14 +2260,9 @@ pub async fn export_all_relationships(
                 labels(b) AS end_labels"
     };
 
-    let ns = namespace_filter
-        .map(|ns| ns.to_vec())
-        .unwrap_or_default();
+    let ns = namespace_filter.map(|ns| ns.to_vec()).unwrap_or_default();
 
-    let mut result = graph.execute(
-        query(cypher)
-            .param("namespaces", ns)
-    ).await?;
+    let mut result = graph.execute(query(cypher).param("namespaces", ns)).await?;
 
     let mut rels = Vec::new();
     while let Some(row) = result.next().await? {
@@ -2039,7 +2289,8 @@ pub async fn add_session(
     session: &Session,
     embedding: Option<&[f32]>,
 ) -> Result<()> {
-    let embedding_vec: Option<Vec<f64>> = embedding.map(|e| e.iter().map(|&x| f64::from(x)).collect());
+    let embedding_vec: Option<Vec<f64>> =
+        embedding.map(|e| e.iter().map(|&x| f64::from(x)).collect());
 
     let cypher = if embedding_vec.is_some() {
         "MERGE (s:Session {session_id: $session_id})
@@ -2121,11 +2372,13 @@ pub async fn get_sessions(
          LIMIT $limit"
     };
 
-    let mut result = graph.execute(
-        query(cypher)
-        .param("namespaces", ns)
-        .param("limit", limit as i64)
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(cypher)
+                .param("namespaces", ns)
+                .param("limit", limit as i64),
+        )
+        .await?;
 
     let mut sessions = Vec::new();
     while let Some(row) = result.next().await? {
@@ -2136,7 +2389,10 @@ pub async fn get_sessions(
             namespace: row.get("namespace").unwrap_or_default(),
             first_prompt: row.get("first_prompt").unwrap_or_default(),
             summary: row.get::<String>("summary").ok().filter(|s| !s.is_empty()),
-            git_branch: row.get::<String>("git_branch").ok().filter(|s| !s.is_empty()),
+            git_branch: row
+                .get::<String>("git_branch")
+                .ok()
+                .filter(|s| !s.is_empty()),
             created_at: row.get("created_at").unwrap_or_default(),
             ended_at: row.get::<String>("ended_at").ok().filter(|s| !s.is_empty()),
             message_count: row.get("message_count").ok(),
@@ -2184,12 +2440,15 @@ pub async fn search_sessions_hybrid(
          LIMIT $limit"
     };
 
-    if let Ok(mut result) = graph.execute(
-        query(ft_cypher)
-        .param("query", ft_query.as_str())
-        .param("namespaces", ns.clone())
-        .param("limit", (limit * 2) as i64)
-    ).await {
+    if let Ok(mut result) = graph
+        .execute(
+            query(ft_cypher)
+                .param("query", ft_query.as_str())
+                .param("namespaces", ns.clone())
+                .param("limit", (limit * 2) as i64),
+        )
+        .await
+    {
         while let Ok(Some(row)) = result.next().await {
             let session_id: String = row.get("session_id").unwrap_or_default();
             let score: f64 = row.get("score").unwrap_or(0.0);
@@ -2200,7 +2459,10 @@ pub async fn search_sessions_hybrid(
                 namespace: row.get("namespace").unwrap_or_default(),
                 first_prompt: row.get("first_prompt").unwrap_or_default(),
                 summary: row.get::<String>("summary").ok().filter(|s| !s.is_empty()),
-                git_branch: row.get::<String>("git_branch").ok().filter(|s| !s.is_empty()),
+                git_branch: row
+                    .get::<String>("git_branch")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
                 created_at: row.get("created_at").unwrap_or_default(),
                 ended_at: row.get::<String>("ended_at").ok().filter(|s| !s.is_empty()),
                 message_count: row.get("message_count").ok(),
@@ -2234,12 +2496,15 @@ pub async fn search_sessions_hybrid(
                     score"
         };
 
-        if let Ok(mut result) = graph.execute(
-            query(vec_cypher)
-            .param("embedding", embedding_vec)
-            .param("namespaces", ns)
-            .param("limit", (limit * 2) as i64)
-        ).await {
+        if let Ok(mut result) = graph
+            .execute(
+                query(vec_cypher)
+                    .param("embedding", embedding_vec)
+                    .param("namespaces", ns)
+                    .param("limit", (limit * 2) as i64),
+            )
+            .await
+        {
             let ft_count = fulltext_results.len();
             while let Ok(Some(row)) = result.next().await {
                 let session_id: String = row.get("session_id").unwrap_or_default();
@@ -2255,13 +2520,20 @@ pub async fn search_sessions_hybrid(
                         namespace: row.get("namespace").unwrap_or_default(),
                         first_prompt: row.get("first_prompt").unwrap_or_default(),
                         summary: row.get::<String>("summary").ok().filter(|s| !s.is_empty()),
-                        git_branch: row.get::<String>("git_branch").ok().filter(|s| !s.is_empty()),
+                        git_branch: row
+                            .get::<String>("git_branch")
+                            .ok()
+                            .filter(|s| !s.is_empty()),
                         created_at: row.get("created_at").unwrap_or_default(),
                         ended_at: row.get::<String>("ended_at").ok().filter(|s| !s.is_empty()),
                         message_count: row.get("message_count").ok(),
                         is_sidechain: row.get("is_sidechain").unwrap_or(false),
                     };
-                    let boost = if ft_count > 0 { vec_score * 0.8 } else { vec_score };
+                    let boost = if ft_count > 0 {
+                        vec_score * 0.8
+                    } else {
+                        vec_score
+                    };
                     fulltext_results.insert(session_id, (session, boost));
                 }
             }
@@ -2276,25 +2548,31 @@ pub async fn search_sessions_hybrid(
 
 #[cfg(feature = "sessions")]
 pub async fn ensure_session_indexes(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE CONSTRAINT session_id_unique IF NOT EXISTS
-         FOR (s:Session) REQUIRE s.session_id IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT session_id_unique IF NOT EXISTS
+         FOR (s:Session) REQUIRE s.session_id IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE VECTOR INDEX session_embedding IF NOT EXISTS
+    graph
+        .run(query(
+            "CREATE VECTOR INDEX session_embedding IF NOT EXISTS
          FOR (s:Session)
          ON s.embedding
          OPTIONS {indexConfig: {
            `vector.dimensions`: 768,
            `vector.similarity_function`: 'cosine'
-         }}"
-    )).await?;
+         }}",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE FULLTEXT INDEX session_fulltext IF NOT EXISTS
-         FOR (s:Session) ON EACH [s.first_prompt, s.summary, s.slug]"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE FULLTEXT INDEX session_fulltext IF NOT EXISTS
+         FOR (s:Session) ON EACH [s.first_prompt, s.summary, s.slug]",
+        ))
+        .await?;
 
     Ok(())
 }
@@ -2320,12 +2598,9 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 #[cfg(feature = "sessions")]
-pub async fn add_turn(
-    graph: &Graph,
-    turn: &Turn,
-    embedding: Option<&[f32]>,
-) -> Result<()> {
-    let embedding_vec: Option<Vec<f64>> = embedding.map(|e| e.iter().map(|&x| f64::from(x)).collect());
+pub async fn add_turn(graph: &Graph, turn: &Turn, embedding: Option<&[f32]>) -> Result<()> {
+    let embedding_vec: Option<Vec<f64>> =
+        embedding.map(|e| e.iter().map(|&x| f64::from(x)).collect());
 
     let cypher = if embedding_vec.is_some() {
         "MERGE (t:Turn {turn_id: $turn_id})
@@ -2386,13 +2661,19 @@ pub async fn add_turn(
         .param("text", turn.text.as_str())
         .param("model", turn.model.as_deref().unwrap_or(""))
         .param("timestamp", turn.timestamp.as_str())
-        .param("parent_turn_id", turn.parent_turn_id.as_deref().unwrap_or(""))
+        .param(
+            "parent_turn_id",
+            turn.parent_turn_id.as_deref().unwrap_or(""),
+        )
         .param("is_sidechain", turn.is_sidechain)
         .param("git_branch", turn.git_branch.as_deref().unwrap_or(""))
         .param("cwd", turn.cwd.as_deref().unwrap_or(""))
         .param("input_tokens", turn.input_tokens.unwrap_or(0))
         .param("output_tokens", turn.output_tokens.unwrap_or(0))
-        .param("cache_creation_tokens", turn.cache_creation_tokens.unwrap_or(0))
+        .param(
+            "cache_creation_tokens",
+            turn.cache_creation_tokens.unwrap_or(0),
+        )
         .param("cache_read_tokens", turn.cache_read_tokens.unwrap_or(0))
         .param("tool_use_count", turn.tool_use_count)
         .param("tool_use_names", names);
@@ -2411,7 +2692,8 @@ pub async fn add_reflection(
     reflection: &Reflection,
     embedding: Option<&[f32]>,
 ) -> Result<()> {
-    let embedding_vec: Option<Vec<f64>> = embedding.map(|e| e.iter().map(|&x| f64::from(x)).collect());
+    let embedding_vec: Option<Vec<f64>> =
+        embedding.map(|e| e.iter().map(|&x| f64::from(x)).collect());
 
     let cypher = if embedding_vec.is_some() {
         "MERGE (r:Reflection {reflection_id: $reflection_id})
@@ -2466,9 +2748,10 @@ pub async fn add_toolcall(
 ) -> Result<()> {
     let truncated_input = truncate_str(&call.input_json, TOOLCALL_INPUT_MAX_LEN);
 
-    graph.run(
-        query(
-            "MERGE (tc:ToolCall {tool_call_id: $tool_call_id})
+    graph
+        .run(
+            query(
+                "MERGE (tc:ToolCall {tool_call_id: $tool_call_id})
              SET tc.turn_id = $turn_id,
                  tc.session_id = $session_id,
                  tc.namespace = $namespace,
@@ -2478,89 +2761,97 @@ pub async fn add_toolcall(
                  tc.created_at = coalesce(tc.created_at, datetime())
              WITH tc
              MATCH (t:Turn {turn_id: $turn_id})
-             MERGE (t)-[:CALLED]->(tc)"
+             MERGE (t)-[:CALLED]->(tc)",
+            )
+            .param("tool_call_id", call.tool_call_id.as_str())
+            .param("turn_id", call.turn_id.as_str())
+            .param("session_id", call.session_id.as_str())
+            .param("namespace", call.namespace.as_str())
+            .param("name", call.name.as_str())
+            .param("input_json", truncated_input.as_str())
+            .param("timestamp", call.timestamp.as_str()),
         )
-        .param("tool_call_id", call.tool_call_id.as_str())
-        .param("turn_id", call.turn_id.as_str())
-        .param("session_id", call.session_id.as_str())
-        .param("namespace", call.namespace.as_str())
-        .param("name", call.name.as_str())
-        .param("input_json", truncated_input.as_str())
-        .param("timestamp", call.timestamp.as_str())
-    ).await?;
+        .await?;
 
     for touch in file_touches {
-        graph.run(
-            query(
-                "MERGE (f:File {path: $path})
+        graph
+            .run(
+                query(
+                    "MERGE (f:File {path: $path})
                  ON CREATE SET f.created_at = datetime(), f.updated_at = datetime()
                  ON MATCH SET f.updated_at = datetime()
                  WITH f
                  MATCH (tc:ToolCall {tool_call_id: $tool_call_id})
                  MERGE (tc)-[r:TOUCHED]->(f)
-                 SET r.action = $action"
+                 SET r.action = $action",
+                )
+                .param("path", touch.path.as_str())
+                .param("tool_call_id", call.tool_call_id.as_str())
+                .param("action", touch.action.as_str()),
             )
-            .param("path", touch.path.as_str())
-            .param("tool_call_id", call.tool_call_id.as_str())
-            .param("action", touch.action.as_str())
-        ).await?;
+            .await?;
     }
 
     if let Some(bc) = bash {
         let truncated_cmd = truncate_str(&bc.cmd, COMMAND_CMD_MAX_LEN);
-        graph.run(
-            query(
-                "MERGE (c:Command {cmd: $cmd})
+        graph
+            .run(
+                query(
+                    "MERGE (c:Command {cmd: $cmd})
                  ON CREATE SET c.first_seen_at = datetime(), c.last_seen_at = datetime()
                  ON MATCH SET c.last_seen_at = datetime()
                  WITH c
                  MATCH (tc:ToolCall {tool_call_id: $tool_call_id})
                  MERGE (tc)-[r:RAN]->(c)
-                 SET r.description = $description"
+                 SET r.description = $description",
+                )
+                .param("cmd", truncated_cmd.as_str())
+                .param("tool_call_id", call.tool_call_id.as_str())
+                .param("description", bc.description.as_deref().unwrap_or("")),
             )
-            .param("cmd", truncated_cmd.as_str())
-            .param("tool_call_id", call.tool_call_id.as_str())
-            .param("description", bc.description.as_deref().unwrap_or(""))
-        ).await?;
+            .await?;
     }
 
     Ok(())
 }
 
 #[cfg(feature = "sessions")]
-pub async fn backfill_toolcall_result(
-    graph: &Graph,
-    backfill: &ToolResultBackfill,
-) -> Result<()> {
-    let truncated_err = backfill.error_text.as_deref()
+pub async fn backfill_toolcall_result(graph: &Graph, backfill: &ToolResultBackfill) -> Result<()> {
+    let truncated_err = backfill
+        .error_text
+        .as_deref()
         .map(|s| truncate_str(s, TOOLCALL_ERROR_MAX_LEN))
         .unwrap_or_default();
 
-    graph.run(
-        query(
-            "MATCH (tc:ToolCall {tool_call_id: $tool_call_id})
+    graph
+        .run(
+            query(
+                "MATCH (tc:ToolCall {tool_call_id: $tool_call_id})
              SET tc.is_error = $is_error,
-                 tc.error_text = $error_text"
+                 tc.error_text = $error_text",
+            )
+            .param("tool_call_id", backfill.tool_call_id.as_str())
+            .param("is_error", backfill.is_error)
+            .param("error_text", truncated_err.as_str()),
         )
-        .param("tool_call_id", backfill.tool_call_id.as_str())
-        .param("is_error", backfill.is_error)
-        .param("error_text", truncated_err.as_str())
-    ).await?;
+        .await?;
     Ok(())
 }
 
 #[cfg(feature = "sessions")]
 pub async fn build_reply_chain(graph: &Graph, session_id: &str) -> Result<u64> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (t:Turn {session_id: $session_id})
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (t:Turn {session_id: $session_id})
              WHERE t.parent_turn_id IS NOT NULL AND t.parent_turn_id <> ''
              MATCH (p:Turn {turn_id: t.parent_turn_id})
              MERGE (t)-[:REPLIES_TO]->(p)
-             RETURN count(*) AS n"
+             RETURN count(*) AS n",
+            )
+            .param("session_id", session_id),
         )
-        .param("session_id", session_id)
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let n: i64 = row.get("n").unwrap_or(0);
@@ -2572,9 +2863,10 @@ pub async fn build_reply_chain(graph: &Graph, session_id: &str) -> Result<u64> {
 
 #[cfg(feature = "sessions")]
 pub async fn delete_session_turns(graph: &Graph, session_id: &str) -> Result<u64> {
-    let mut result = graph.execute(
-        query(
-            "MATCH (s:Session {session_id: $session_id})-[:HAS_TURN]->(t:Turn)
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (s:Session {session_id: $session_id})-[:HAS_TURN]->(t:Turn)
              OPTIONAL MATCH (t)-[:HAS_REFLECTION]->(r:Reflection)
              OPTIONAL MATCH (t)-[:CALLED]->(tc:ToolCall)
              WITH t, collect(DISTINCT r) AS reflections, collect(DISTINCT tc) AS toolcalls
@@ -2585,10 +2877,11 @@ pub async fn delete_session_turns(graph: &Graph, session_id: &str) -> Result<u64
              WITH toolcalls
              UNWIND toolcalls AS tc
              DETACH DELETE tc
-             RETURN count(*) AS n"
+             RETURN count(*) AS n",
+            )
+            .param("session_id", session_id),
         )
-        .param("session_id", session_id)
-    ).await?;
+        .await?;
 
     if let Some(row) = result.next().await? {
         let n: i64 = row.get("n").unwrap_or(0);
@@ -2604,25 +2897,27 @@ pub async fn update_session_aggregates(
     session_id: &str,
     agg: &SessionAggregates,
 ) -> Result<()> {
-    graph.run(
-        query(
-            "MATCH (s:Session {session_id: $session_id})
+    graph
+        .run(
+            query(
+                "MATCH (s:Session {session_id: $session_id})
              SET s.total_turns = $total_turns,
                  s.total_text_chars = $total_text_chars,
                  s.total_thinking_chars = $total_thinking_chars,
                  s.total_input_tokens = $total_input_tokens,
                  s.total_output_tokens = $total_output_tokens,
                  s.total_tool_calls = $total_tool_calls,
-                 s.deep_indexed_at = datetime()"
+                 s.deep_indexed_at = datetime()",
+            )
+            .param("session_id", session_id)
+            .param("total_turns", agg.total_turns)
+            .param("total_text_chars", agg.total_text_chars)
+            .param("total_thinking_chars", agg.total_thinking_chars)
+            .param("total_input_tokens", agg.total_input_tokens)
+            .param("total_output_tokens", agg.total_output_tokens)
+            .param("total_tool_calls", agg.total_tool_calls),
         )
-        .param("session_id", session_id)
-        .param("total_turns", agg.total_turns)
-        .param("total_text_chars", agg.total_text_chars)
-        .param("total_thinking_chars", agg.total_thinking_chars)
-        .param("total_input_tokens", agg.total_input_tokens)
-        .param("total_output_tokens", agg.total_output_tokens)
-        .param("total_tool_calls", agg.total_tool_calls)
-    ).await?;
+        .await?;
     Ok(())
 }
 
@@ -2660,12 +2955,15 @@ pub async fn search_turns_hybrid(
          LIMIT $limit"
     };
 
-    if let Ok(mut result) = graph.execute(
-        query(ft_cypher)
-        .param("query", ft_query.as_str())
-        .param("namespaces", ns.clone())
-        .param("limit", (limit * 2) as i64)
-    ).await {
+    if let Ok(mut result) = graph
+        .execute(
+            query(ft_cypher)
+                .param("query", ft_query.as_str())
+                .param("namespaces", ns.clone())
+                .param("limit", (limit * 2) as i64),
+        )
+        .await
+    {
         while let Ok(Some(row)) = result.next().await {
             let turn_id: String = row.get("turn_id").unwrap_or_default();
             let score: f64 = row.get("score").unwrap_or(0.0);
@@ -2704,12 +3002,15 @@ pub async fn search_turns_hybrid(
                     node.is_sidechain AS is_sidechain, score"
         };
 
-        if let Ok(mut result) = graph.execute(
-            query(vec_cypher)
-            .param("embedding", embedding_vec)
-            .param("namespaces", ns)
-            .param("limit", (limit * 2) as i64)
-        ).await {
+        if let Ok(mut result) = graph
+            .execute(
+                query(vec_cypher)
+                    .param("embedding", embedding_vec)
+                    .param("namespaces", ns)
+                    .param("limit", (limit * 2) as i64),
+            )
+            .await
+        {
             let ft_count = results.len();
             while let Ok(Some(row)) = result.next().await {
                 let turn_id: String = row.get("turn_id").unwrap_or_default();
@@ -2729,7 +3030,11 @@ pub async fn search_turns_hybrid(
                         is_sidechain: row.get("is_sidechain").unwrap_or(false),
                         ..Turn::default()
                     };
-                    let boost = if ft_count > 0 { vec_score * 0.8 } else { vec_score };
+                    let boost = if ft_count > 0 {
+                        vec_score * 0.8
+                    } else {
+                        vec_score
+                    };
                     results.insert(turn_id, (turn, boost));
                 }
             }
@@ -2774,12 +3079,15 @@ pub async fn search_reflections_hybrid(
          LIMIT $limit"
     };
 
-    if let Ok(mut result) = graph.execute(
-        query(ft_cypher)
-        .param("query", ft_query.as_str())
-        .param("namespaces", ns.clone())
-        .param("limit", (limit * 2) as i64)
-    ).await {
+    if let Ok(mut result) = graph
+        .execute(
+            query(ft_cypher)
+                .param("query", ft_query.as_str())
+                .param("namespaces", ns.clone())
+                .param("limit", (limit * 2) as i64),
+        )
+        .await
+    {
         while let Ok(Some(row)) = result.next().await {
             let rid: String = row.get("reflection_id").unwrap_or_default();
             let score: f64 = row.get("score").unwrap_or(0.0);
@@ -2814,12 +3122,15 @@ pub async fn search_reflections_hybrid(
                     node.text AS text, node.timestamp AS timestamp, score"
         };
 
-        if let Ok(mut result) = graph.execute(
-            query(vec_cypher)
-            .param("embedding", embedding_vec)
-            .param("namespaces", ns)
-            .param("limit", (limit * 2) as i64)
-        ).await {
+        if let Ok(mut result) = graph
+            .execute(
+                query(vec_cypher)
+                    .param("embedding", embedding_vec)
+                    .param("namespaces", ns)
+                    .param("limit", (limit * 2) as i64),
+            )
+            .await
+        {
             let ft_count = results.len();
             while let Ok(Some(row)) = result.next().await {
                 let rid: String = row.get("reflection_id").unwrap_or_default();
@@ -2837,7 +3148,11 @@ pub async fn search_reflections_hybrid(
                         signature: None,
                         timestamp: row.get("timestamp").unwrap_or_default(),
                     };
-                    let boost = if ft_count > 0 { vec_score * 0.8 } else { vec_score };
+                    let boost = if ft_count > 0 {
+                        vec_score * 0.8
+                    } else {
+                        vec_score
+                    };
                     results.insert(rid, (r, boost));
                 }
             }
@@ -2852,75 +3167,99 @@ pub async fn search_reflections_hybrid(
 
 #[cfg(feature = "sessions")]
 pub async fn ensure_turn_indexes(graph: &Graph) -> Result<()> {
-    graph.run(query(
-        "CREATE CONSTRAINT turn_id_unique IF NOT EXISTS
-         FOR (t:Turn) REQUIRE t.turn_id IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT turn_id_unique IF NOT EXISTS
+         FOR (t:Turn) REQUIRE t.turn_id IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE CONSTRAINT reflection_id_unique IF NOT EXISTS
-         FOR (r:Reflection) REQUIRE r.reflection_id IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT reflection_id_unique IF NOT EXISTS
+         FOR (r:Reflection) REQUIRE r.reflection_id IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE CONSTRAINT file_path_unique IF NOT EXISTS
-         FOR (f:File) REQUIRE f.path IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT file_path_unique IF NOT EXISTS
+         FOR (f:File) REQUIRE f.path IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE CONSTRAINT command_cmd_unique IF NOT EXISTS
-         FOR (c:Command) REQUIRE c.cmd IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT command_cmd_unique IF NOT EXISTS
+         FOR (c:Command) REQUIRE c.cmd IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE CONSTRAINT toolcall_id_unique IF NOT EXISTS
-         FOR (tc:ToolCall) REQUIRE tc.tool_call_id IS UNIQUE"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE CONSTRAINT toolcall_id_unique IF NOT EXISTS
+         FOR (tc:ToolCall) REQUIRE tc.tool_call_id IS UNIQUE",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE VECTOR INDEX turn_embedding IF NOT EXISTS
+    graph
+        .run(query(
+            "CREATE VECTOR INDEX turn_embedding IF NOT EXISTS
          FOR (t:Turn)
          ON t.embedding
          OPTIONS {indexConfig: {
            `vector.dimensions`: 768,
            `vector.similarity_function`: 'cosine'
-         }}"
-    )).await?;
+         }}",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE VECTOR INDEX reflection_embedding IF NOT EXISTS
+    graph
+        .run(query(
+            "CREATE VECTOR INDEX reflection_embedding IF NOT EXISTS
          FOR (r:Reflection)
          ON r.embedding
          OPTIONS {indexConfig: {
            `vector.dimensions`: 768,
            `vector.similarity_function`: 'cosine'
-         }}"
-    )).await?;
+         }}",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE FULLTEXT INDEX turn_fulltext IF NOT EXISTS
-         FOR (t:Turn) ON EACH [t.text]"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE FULLTEXT INDEX turn_fulltext IF NOT EXISTS
+         FOR (t:Turn) ON EACH [t.text]",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE FULLTEXT INDEX reflection_fulltext IF NOT EXISTS
-         FOR (r:Reflection) ON EACH [r.text]"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE FULLTEXT INDEX reflection_fulltext IF NOT EXISTS
+         FOR (r:Reflection) ON EACH [r.text]",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE FULLTEXT INDEX command_fulltext IF NOT EXISTS
-         FOR (c:Command) ON EACH [c.cmd]"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE FULLTEXT INDEX command_fulltext IF NOT EXISTS
+         FOR (c:Command) ON EACH [c.cmd]",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE INDEX turn_timestamp IF NOT EXISTS
-         FOR (t:Turn) ON (t.timestamp)"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE INDEX turn_timestamp IF NOT EXISTS
+         FOR (t:Turn) ON (t.timestamp)",
+        ))
+        .await?;
 
-    graph.run(query(
-        "CREATE INDEX turn_session_id IF NOT EXISTS
-         FOR (t:Turn) ON (t.session_id)"
-    )).await?;
+    graph
+        .run(query(
+            "CREATE INDEX turn_session_id IF NOT EXISTS
+         FOR (t:Turn) ON (t.session_id)",
+        ))
+        .await?;
 
     Ok(())
 }
@@ -2951,11 +3290,13 @@ pub async fn get_unenriched_sessions(
          LIMIT $limit"
     };
 
-    let mut result = graph.execute(
-        query(cypher)
-        .param("namespaces", ns)
-        .param("limit", limit as i64)
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(cypher)
+                .param("namespaces", ns)
+                .param("limit", limit as i64),
+        )
+        .await?;
 
     let mut ids = Vec::new();
     while let Some(row) = result.next().await? {
@@ -2975,15 +3316,17 @@ pub async fn get_session_text_for_enrichment(
 ) -> Result<String> {
     let mut buf = String::new();
 
-    let mut turn_result = graph.execute(
-        query(
-            "MATCH (t:Turn {session_id: $session_id})
+    let mut turn_result = graph
+        .execute(
+            query(
+                "MATCH (t:Turn {session_id: $session_id})
              WHERE t.text IS NOT NULL AND t.text <> ''
              RETURN t.role AS role, t.text AS text, t.timestamp AS ts
-             ORDER BY t.timestamp ASC"
+             ORDER BY t.timestamp ASC",
+            )
+            .param("session_id", session_id),
         )
-        .param("session_id", session_id)
-    ).await?;
+        .await?;
 
     while let Some(row) = turn_result.next().await? {
         if buf.len() >= max_chars {
@@ -2998,15 +3341,17 @@ pub async fn get_session_text_for_enrichment(
     }
 
     if include_reflections && buf.len() < max_chars {
-        let mut refl_result = graph.execute(
-            query(
-                "MATCH (r:Reflection {session_id: $session_id})
+        let mut refl_result = graph
+            .execute(
+                query(
+                    "MATCH (r:Reflection {session_id: $session_id})
                  WHERE r.text IS NOT NULL AND r.text <> ''
                  RETURN r.text AS text
-                 ORDER BY r.timestamp ASC"
+                 ORDER BY r.timestamp ASC",
+                )
+                .param("session_id", session_id),
             )
-            .param("session_id", session_id)
-        ).await?;
+            .await?;
 
         while let Some(row) = refl_result.next().await? {
             if buf.len() >= max_chars {
@@ -3039,19 +3384,21 @@ pub async fn link_concept_to_session(
     session_id: &str,
     count: i64,
 ) -> Result<()> {
-    graph.run(
-        query(
-            "MATCH (c:Concept {name: $name, namespace: $namespace})
+    graph
+        .run(
+            query(
+                "MATCH (c:Concept {name: $name, namespace: $namespace})
              MATCH (s:Session {session_id: $session_id})
              MERGE (c)-[r:MENTIONED_IN]->(s)
              ON CREATE SET r.count = $count, r.first_mentioned_at = datetime()
-             ON MATCH SET r.count = $count, r.last_mentioned_at = datetime()"
+             ON MATCH SET r.count = $count, r.last_mentioned_at = datetime()",
+            )
+            .param("name", concept_name)
+            .param("namespace", namespace)
+            .param("session_id", session_id)
+            .param("count", count),
         )
-        .param("name", concept_name)
-        .param("namespace", namespace)
-        .param("session_id", session_id)
-        .param("count", count)
-    ).await?;
+        .await?;
     Ok(())
 }
 
@@ -3087,12 +3434,14 @@ pub async fn get_sessions_for_concept(
          LIMIT $limit"
     };
 
-    let mut result = graph.execute(
-        query(cypher)
-        .param("name", concept_name)
-        .param("namespaces", ns)
-        .param("limit", limit as i64)
-    ).await?;
+    let mut result = graph
+        .execute(
+            query(cypher)
+                .param("name", concept_name)
+                .param("namespaces", ns)
+                .param("limit", limit as i64),
+        )
+        .await?;
 
     let mut out = Vec::new();
     while let Some(row) = result.next().await? {
@@ -3103,7 +3452,10 @@ pub async fn get_sessions_for_concept(
             namespace: row.get("namespace").unwrap_or_default(),
             first_prompt: row.get("first_prompt").unwrap_or_default(),
             summary: row.get::<String>("summary").ok().filter(|s| !s.is_empty()),
-            git_branch: row.get::<String>("git_branch").ok().filter(|s| !s.is_empty()),
+            git_branch: row
+                .get::<String>("git_branch")
+                .ok()
+                .filter(|s| !s.is_empty()),
             created_at: row.get("created_at").unwrap_or_default(),
             ended_at: row.get::<String>("ended_at").ok().filter(|s| !s.is_empty()),
             message_count: row.get("message_count").ok(),
@@ -3121,14 +3473,16 @@ pub async fn mark_session_enriched(
     session_id: &str,
     concept_count: i64,
 ) -> Result<()> {
-    graph.run(
-        query(
-            "MATCH (s:Session {session_id: $session_id})
+    graph
+        .run(
+            query(
+                "MATCH (s:Session {session_id: $session_id})
              SET s.enriched_at = datetime(),
-                 s.concept_mention_count = $concept_count"
+                 s.concept_mention_count = $concept_count",
+            )
+            .param("session_id", session_id)
+            .param("concept_count", concept_count),
         )
-        .param("session_id", session_id)
-        .param("concept_count", concept_count)
-    ).await?;
+        .await?;
     Ok(())
 }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use neo4rs::{query, Graph};
+use neo4rs::{Graph, query};
 use serde::Serialize;
 
 use crate::embeddings::cosine_similarity;
@@ -157,7 +157,11 @@ fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<
     }
     let intersection = a.intersection(b).count() as f32;
     let union = a.union(b).count() as f32;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 async fn find_supersession_candidates(
@@ -285,7 +289,8 @@ pub async fn staleness(
         println!("⏰ STALE CONCEPTS ({} found):", report.age_stale.len());
         for c in &report.age_stale {
             let age_str = c
-                .age_days.map_or_else(|| "unknown age".to_string(), |d| format!("{d} days old"));
+                .age_days
+                .map_or_else(|| "unknown age".to_string(), |d| format!("{d} days old"));
             println!("  {} [{}] - {}", c.name, c.namespace, age_str);
         }
     }
@@ -325,18 +330,14 @@ pub async fn staleness(
 
     println!();
     println!("═══════════════════════════════════════");
-    let total = report.age_stale.len()
-        + report.orphaned.len()
-        + report.supersession_candidates.len();
+    let total =
+        report.age_stale.len() + report.orphaned.len() + report.supersession_candidates.len();
     println!("Total candidates for review: {total}");
 
     Ok(())
 }
 
-async fn find_global_refugees(
-    graph: &Graph,
-    namespaces: &[String],
-) -> Result<Vec<NamespaceIssue>> {
+async fn find_global_refugees(graph: &Graph, namespaces: &[String]) -> Result<Vec<NamespaceIssue>> {
     let known_prefixes: Vec<&str> = namespaces
         .iter()
         .filter(|ns| *ns != "global")
@@ -430,10 +431,7 @@ async fn find_prefix_mismatches(
     Ok(issues)
 }
 
-async fn find_cross_namespace(
-    graph: &Graph,
-    namespaces: &[String],
-) -> Result<Vec<NamespaceIssue>> {
+async fn find_cross_namespace(graph: &Graph, namespaces: &[String]) -> Result<Vec<NamespaceIssue>> {
     let q = query(
         r"
         MATCH (c:Concept)
@@ -592,7 +590,10 @@ pub async fn namespaces(
     if report.cross_namespace.is_empty() {
         println!("🔗 CROSS-NAMESPACE: none");
     } else {
-        println!("🔗 CROSS-NAMESPACE ({} found):", report.cross_namespace.len());
+        println!(
+            "🔗 CROSS-NAMESPACE ({} found):",
+            report.cross_namespace.len()
+        );
         for issue in &report.cross_namespace {
             let total = issue.same_ns_relationships + issue.other_ns_relationships;
             let other_pct = if total > 0 {

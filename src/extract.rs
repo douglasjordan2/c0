@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::Path;
@@ -101,7 +101,8 @@ fn parse_transcript_file(path: &Path) -> Result<String> {
 }
 
 fn extract_date_from_filename(path: &Path) -> String {
-    let filename = path.file_stem()
+    let filename = path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
 
@@ -110,15 +111,17 @@ fn extract_date_from_filename(path: &Path) -> String {
         && let (Ok(_y), Ok(_m), Ok(_d)) = (
             parts[0].parse::<u32>(),
             parts[1].parse::<u32>(),
-            parts[2].parse::<u32>()
-        ) {
-            return format!("{}-{}-{}", parts[0], parts[1], parts[2]);
-        }
+            parts[2].parse::<u32>(),
+        )
+    {
+        return format!("{}-{}-{}", parts[0], parts[1], parts[2]);
+    }
     "unknown".to_string()
 }
 
 fn extract_title_from_filename(path: &Path) -> String {
-    let filename = path.file_stem()
+    let filename = path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("meeting");
 
@@ -130,7 +133,8 @@ fn extract_title_from_filename(path: &Path) -> String {
             .copied()
             .collect();
         if !title_parts.is_empty() {
-            return title_parts.join(" ")
+            return title_parts
+                .join(" ")
                 .replace('_', " ")
                 .split_whitespace()
                 .map(|w| {
@@ -150,7 +154,8 @@ fn extract_title_from_filename(path: &Path) -> String {
 const EXTRACTION_SCHEMA: &str = r#"{"type":"object","properties":{"attendees":{"type":"array","items":{"type":"string"}},"duration_minutes":{"type":["integer","null"]},"topics":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"normalized_name":{"type":"string"},"context":{"type":"string"}},"required":["name","normalized_name","context"]}},"decisions":{"type":"array","items":{"type":"string"}},"action_items":{"type":"array","items":{"type":"object","properties":{"action":{"type":"string"},"owner":{"type":["string","null"]}},"required":["action"]}},"technical_details":{"type":"array","items":{"type":"string"}},"quotes":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"speaker":{"type":"string"}},"required":["text","speaker"]}},"summary":{"type":"string"}},"required":["attendees","topics","decisions","action_items","technical_details","quotes","summary"]}"#;
 
 fn build_extraction_prompt(transcript: &str) -> String {
-    format!(r#"You are analyzing a meeting transcript. Extract structured information in JSON format.
+    format!(
+        r#"You are analyzing a meeting transcript. Extract structured information in JSON format.
 
 TRANSCRIPT:
 {transcript}
@@ -192,7 +197,8 @@ Focus on:
 - Technical details about systems and integrations
 - Notable quotes that capture key insights
 
-Return ONLY the JSON object, no other text."#)
+Return ONLY the JSON object, no other text."#
+    )
 }
 
 #[derive(Deserialize)]
@@ -232,23 +238,25 @@ async fn extract_with_ollama(
             "num_ctx": 8192
         }
     });
-    eprintln!("   Request body size: {} bytes", serde_json::to_string(&body)?.len());
+    eprintln!(
+        "   Request body size: {} bytes",
+        serde_json::to_string(&body)?.len()
+    );
 
-    let response = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            eprintln!("   Error details: {e:?}");
-            if e.is_timeout() {
-                anyhow!("Request timed out after 600 seconds")
-            } else if e.is_connect() {
-                anyhow!("Failed to connect to Ollama: connection error")
-            } else {
-                anyhow!("Failed to send request to Ollama at {}: {}", ollama_config.host, e)
-            }
-        })?;
+    let response = client.post(&url).json(&body).send().await.map_err(|e| {
+        eprintln!("   Error details: {e:?}");
+        if e.is_timeout() {
+            anyhow!("Request timed out after 600 seconds")
+        } else if e.is_connect() {
+            anyhow!("Failed to connect to Ollama: connection error")
+        } else {
+            anyhow!(
+                "Failed to send request to Ollama at {}: {}",
+                ollama_config.host,
+                e
+            )
+        }
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -269,8 +277,9 @@ async fn extract_with_ollama(
         json_str
     };
 
-    let extracted: ExtractedData = serde_json::from_str(json_str)
-        .map_err(|e| anyhow!("Failed to parse LLM response as JSON: {e}\nResponse was: {json_str}"))?;
+    let extracted: ExtractedData = serde_json::from_str(json_str).map_err(|e| {
+        anyhow!("Failed to parse LLM response as JSON: {e}\nResponse was: {json_str}")
+    })?;
 
     Ok(extracted)
 }
@@ -306,8 +315,9 @@ async fn extract_with_llm(
         json_str
     };
 
-    let extracted: ExtractedData = serde_json::from_str(json_str)
-        .map_err(|e| anyhow!("Failed to parse LLM response as JSON: {e}\nResponse was: {json_str}"))?;
+    let extracted: ExtractedData = serde_json::from_str(json_str).map_err(|e| {
+        anyhow!("Failed to parse LLM response as JSON: {e}\nResponse was: {json_str}")
+    })?;
 
     Ok(extracted)
 }
@@ -328,7 +338,11 @@ pub async fn extract_transcript(input_path: &Path) -> Result<TranscriptExtractio
     };
 
     let truncated = if transcript.len() > max_chars {
-        eprintln!("   Truncating transcript from {} to {} chars", transcript.len(), max_chars);
+        eprintln!(
+            "   Truncating transcript from {} to {} chars",
+            transcript.len(),
+            max_chars
+        );
         transcript.chars().take(max_chars).collect::<String>()
     } else {
         transcript.clone()
@@ -361,14 +375,20 @@ pub async fn extract_transcript(input_path: &Path) -> Result<TranscriptExtractio
 pub fn generate_summary_markdown(extraction: &TranscriptExtraction, namespace: &str) -> String {
     let mut md = String::new();
 
-    md.push_str(&format!("# {namespace} Meeting: {}\n\n", extraction.metadata.title));
+    md.push_str(&format!(
+        "# {namespace} Meeting: {}\n\n",
+        extraction.metadata.title
+    ));
     md.push_str(&format!("> Date: {}", extraction.metadata.date));
     if let Some(duration) = extraction.metadata.duration_minutes {
         md.push_str(&format!(" | Duration: {duration} mins"));
     }
     md.push('\n');
     if !extraction.metadata.attendees.is_empty() {
-        md.push_str(&format!("> Attendees: {}\n", extraction.metadata.attendees.join(", ")));
+        md.push_str(&format!(
+            "> Attendees: {}\n",
+            extraction.metadata.attendees.join(", ")
+        ));
     }
     md.push('\n');
 
@@ -379,7 +399,10 @@ pub fn generate_summary_markdown(extraction: &TranscriptExtraction, namespace: &
     if !extraction.topics.is_empty() {
         md.push_str("## Key Topics\n\n");
         for topic in &extraction.topics {
-            md.push_str(&format!("- **{}** (`{}`): {}\n", topic.name, topic.normalized_name, topic.context));
+            md.push_str(&format!(
+                "- **{}** (`{}`): {}\n",
+                topic.name, topic.normalized_name, topic.context
+            ));
         }
         md.push('\n');
     }
@@ -395,7 +418,11 @@ pub fn generate_summary_markdown(extraction: &TranscriptExtraction, namespace: &
     if !extraction.action_items.is_empty() {
         md.push_str("## Action Items\n\n");
         for item in &extraction.action_items {
-            let owner = item.owner.as_ref().map(|o| format!(" ({o})")).unwrap_or_default();
+            let owner = item
+                .owner
+                .as_ref()
+                .map(|o| format!(" ({o})"))
+                .unwrap_or_default();
             md.push_str(&format!("- [ ] {}{}\n", item.action, owner));
         }
         md.push('\n');
@@ -420,7 +447,8 @@ pub fn generate_summary_markdown(extraction: &TranscriptExtraction, namespace: &
 }
 
 pub fn get_patch_name(date: &str, title: &str, namespace: &str) -> String {
-    let slug = title.to_lowercase()
+    let slug = title
+        .to_lowercase()
         .replace(' ', "-")
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-')
