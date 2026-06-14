@@ -1,0 +1,18 @@
+# Build artifacts
+/target
+
+# Secrets / environment
+.env
+.env.*
+
+# Local c0 state (namespace config, patches)
+.c0/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

@@ -1,0 +1,47 @@
+[package]
+name = "c0"
+version = "0.1.0"
+edition = "2024"
+description = "A bi-temporal knowledge-graph memory system for LLMs — hybrid keyword + vector retrieval over Neo4j, with a self-improving reflection loop."
+license = "MIT"
+repository = "https://github.com/douglasjordan2/c0"
+readme = "README.md"
+keywords = ["llm", "memory", "rag", "knowledge-graph", "embeddings"]
+categories = ["command-line-utilities"]
+authors = ["Douglas Jordan"]
+
+[features]
+default = []
+# Optional: index and semantically search your Claude Code session transcripts.
+sessions = []
+
+[dependencies]
+neo4rs = "0.8"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+dirs = "5"
+chrono = "0.4"
+shellexpand = "3"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+print_stdout = "allow"
+print_stderr = "allow"
+todo = "warn"
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
