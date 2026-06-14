@@ -2,6 +2,8 @@
 
 **An external memory for LLMs** — a bi-temporal knowledge graph with hybrid (keyword + vector) retrieval and a self-improving reflection loop.
 
+![c0 — a live knowledge graph of ~95,000 concepts, sessions, and the relationships between them](assets/brain.png)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
