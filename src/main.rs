@@ -1273,7 +1273,8 @@ async fn main() -> Result<()> {
                 {
                     anyhow::bail!(
                         "'{}' is not in the namespace chain {:?}",
-                        target, ctx.namespaces
+                        target,
+                        ctx.namespaces
                     );
                 }
 
@@ -1386,7 +1387,8 @@ async fn main() -> Result<()> {
                 {
                     anyhow::bail!(
                         "'{}' is not in the namespace chain {:?}",
-                        target, ctx.namespaces
+                        target,
+                        ctx.namespaces
                     );
                 }
 
