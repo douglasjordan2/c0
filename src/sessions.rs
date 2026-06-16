@@ -1449,6 +1449,13 @@ fn enrichment_max_concepts() -> usize {
         .unwrap_or(DEFAULT_MAX_CONCEPTS_PER_SESSION)
 }
 
+fn enrichment_ollama_timeout_secs() -> u64 {
+    std::env::var("C0_ENRICH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ENRICHMENT_OLLAMA_TIMEOUT_SECS)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EnrichStats {
     pub sessions_enriched: u32,
@@ -1479,7 +1486,7 @@ async fn extract_session_concepts_ollama(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
-            ENRICHMENT_OLLAMA_TIMEOUT_SECS,
+            enrichment_ollama_timeout_secs(),
         ))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;
