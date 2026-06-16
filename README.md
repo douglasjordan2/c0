@@ -40,8 +40,8 @@ query ──▶ ❶ exact match ─▶ ❷ keyword (BM25) ─▶ ❸ hybrid (BM2
 
 - **Rust** (2024 edition — 1.85+)
 - **Neo4j 5** — a `docker-compose.yml` is included
-- **[Ollama](https://ollama.com/)** for local embeddings (default model: `nomic-embed-text`)
-- *(optional)* an **Anthropic API key** — used by the reflection classifier and concept extraction; c0 runs without it (those features degrade gracefully)
+- **[Ollama](https://ollama.com/)** for local embeddings *and* the reflection loop's classifier (defaults: `nomic-embed-text` for embeddings, `hermes3:8b` for classification) — the whole loop runs locally, no key required
+- *(optional)* an **Anthropic API key** — opt in with `[claude] enabled = true` to use Claude instead of a local model for classification/extraction (higher quality, at cost)
 
 ## Quickstart
 
@@ -59,7 +59,7 @@ cargo install --path .
 export NEO4J_URI="bolt://localhost:7687"
 export NEO4J_USER=""        # empty for the bundled docker-compose
 export NEO4J_PASSWORD=""
-# export ANTHROPIC_API_KEY="sk-..."   # optional, for the reflector/extraction
+# export ANTHROPIC_API_KEY="sk-..."   # optional; only for [claude] enabled = true (defaults are local Ollama)
 
 # 5. Create indexes (vector + fulltext), then a namespace
 c0 migrate
@@ -102,9 +102,23 @@ c0 reads connection details from the environment, with a per-namespace `.c0/conf
 |---|---|---|
 | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | empty | Neo4j auth |
-| `ANTHROPIC_API_KEY` | — | Optional; reflector classification & extraction |
+| `ANTHROPIC_API_KEY` | — | Optional; used only when `[claude] enabled = true`. By default, classification & extraction run on a local Ollama model — no key needed |
 
 Embedding host/model (Ollama) default to `http://localhost:11434` and `nomic-embed-text`, and are configurable.
+
+## Running locally (modest hardware is fine)
+
+c0's **core recall path — `walk` / `search` / `add` — needs almost nothing.** The only moving parts are Neo4j and a single small embedding model (`nomic-embed-text`, ~140M parameters, well under 1 GB), and both run comfortably **CPU-only**. No GPU, no cloud. A few gigabytes of free RAM cover the graph, the embedder, and Neo4j's page cache for a personal-scale knowledge base.
+
+The heavier work is **optional and runs in the background**. The reflection loop, concept extraction, and session enrichment use a chat LLM — and **by default that's a local Ollama model** (e.g. `qwen2.5:7b`/`:14b` for extraction/enrichment, `hermes3:8b` for classification), so the whole thing runs keyless and offline. Opt into the Anthropic API (`[claude] enabled = true`) only if you want Claude's higher-quality `haiku`/`sonnet` judgment. Because none of this is on the recall hot path, **CPU inference is fine** — a slow background tick never affects how fast `walk` feels.
+
+| If you want… | You need | Notes |
+|---|---|---|
+| **Core recall** (walk / search / add) | CPU + ~2–4 GB free RAM | Neo4j + `nomic-embed-text`. No GPU. |
+| **+ run the loop's classifier on-device** (no API key) | ~8 GB RAM for a 7B model | local `qwen2.5:7b` instead of the API; background, so CPU speed is fine |
+| **Faster / higher-quality local LLM** | a GPU (optional) | ~6 GB VRAM runs the embedder + a 7B model fast; 12–24 GB unlocks 14B–32B |
+
+The short version: the embedding hot path is light enough for any laptop, and the only reason to add a GPU is to make the *optional* local LLM work faster — never to make c0 usable in the first place.
 
 ## Using c0 with Claude Code
 
@@ -147,7 +161,9 @@ Run unattended, this is a flywheel: the more you use c0, the more the gaps in it
 
 ### Run it (the whole point)
 
-The loop only pays off if it runs regularly. The simplest way is the built-in watch mode — it classifies the inbox, applies the commits, sleeps, and repeats:
+**The loop itself isn't optional — it's what makes c0 a memory that improves rather than a static store. What's optional is _how_ you run it.** Recall (`walk`) and reflection are the two halves of the same flywheel: one reads the graph, the other grows it. Skip the reflection half and the graph only ever holds what you typed in by hand. So the real question isn't *whether* to close the loop but *how* — and that's the part that takes tuning: too eager and it spams the graph with noise, too passive and it never learns. Pick a mechanism that fits your workflow and commit to it; everything below is just options.
+
+The simplest is the built-in watch mode — it classifies the inbox, applies the commits, sleeps, and repeats:
 
 ```bash
 c0 reflector run                      # tick every hour, auto-commit the COMMITs
@@ -178,7 +194,7 @@ c0 reflector notify     # emit a summary of the queue state
 c0 reflector clear      # empty the inbox / pending queues
 ```
 
-> Classification uses `ANTHROPIC_API_KEY`. Without it, dead ends still accumulate in the inbox — you just can't auto-classify them until a key is set.
+> Classification runs on a **local Ollama model by default** (`hermes3:8b`) — no key, no cloud, reusing the Ollama you already run for embeddings. Want Claude's higher-quality judgment instead? Set `[claude] enabled = true` and provide `ANTHROPIC_API_KEY`.
 
 ## Architecture notes
 
