@@ -2032,6 +2032,7 @@ impl Default for HybridSearchConfig {
 }
 
 fn reciprocal_rank_fusion(
+    query_text: &str,
     keyword_results: &[SearchResult],
     vector_results: &[SearchResult],
     alpha: f32,
@@ -2056,13 +2057,31 @@ fn reciprocal_rank_fusion(
         }
     }
 
+    // Raw RRF scores are compressed into [0, 1/(k+1)] because the formula only
+    // uses rank position, not match magnitude. A perfect hit (rank #1 in both
+    // lists) tops out near 0.0164 with default k, which sits in the same band as
+    // semantic noise and reads as a miss to any absolute-threshold consumer.
+    // Multiplying by (k+1) rescales to [0,1]: rank-#1-in-both -> 1.0,
+    // keyword-only-#1 -> alpha, vector-only-#1 -> (1 - alpha).
+    let norm = k + 1.0;
+    let query_norm = query_text.trim().to_lowercase();
+
     let mut fused: Vec<SearchResult> = scores
         .into_iter()
-        .map(|((name, namespace), (score, desc))| SearchResult {
-            name,
-            namespace,
-            description: desc,
-            similarity: score,
+        .map(|((name, namespace), (score, desc))| {
+            // An exact (case-insensitive) name match must dominate regardless of
+            // where the embedding model happened to rank it among semantic noise.
+            let similarity = if name.trim().to_lowercase() == query_norm {
+                1.0
+            } else {
+                (score * norm).min(1.0)
+            };
+            SearchResult {
+                name,
+                namespace,
+                description: desc,
+                similarity,
+            }
         })
         .collect();
     fused.sort_by(|a, b| {
@@ -2091,7 +2110,13 @@ pub async fn search_hybrid(
         namespaces,
     )
     .await?;
-    let mut fused = reciprocal_rank_fusion(&ft_results, &vec_results, config.alpha, config.k);
+    let mut fused = reciprocal_rank_fusion(
+        query_text,
+        &ft_results,
+        &vec_results,
+        config.alpha,
+        config.k,
+    );
     fused.truncate(limit);
     Ok(fused)
 }
@@ -2126,7 +2151,13 @@ pub async fn search_hybrid_temporal(
         })
         .collect();
 
-    let fused = reciprocal_rank_fusion(&ft_results, &vec_results, config.alpha, config.k);
+    let fused = reciprocal_rank_fusion(
+        query_text,
+        &ft_results,
+        &vec_results,
+        config.alpha,
+        config.k,
+    );
     Ok(fused.into_iter().map(|r| (r.name, r.similarity)).collect())
 }
 
@@ -3579,4 +3610,84 @@ pub async fn mark_session_enriched(
         )
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(name: &str) -> SearchResult {
+        SearchResult {
+            name: name.to_string(),
+            namespace: "personal".to_string(),
+            description: None,
+            similarity: 0.0,
+        }
+    }
+
+    // Regression for issue #18: a verbatim name match must score at the top of
+    // the [0,1] range, not in the RRF noise band (~0.0164).
+    #[test]
+    fn exact_name_match_scores_one() {
+        let query = "Shopify content_for blocks needs block_order";
+        let keyword = vec![result("Figma MCP tool-call quota"), result(query)];
+        // Embedding ranks the exact node well below semantic noise.
+        let vector = vec![
+            result("Figma MCP tool-call quota"),
+            result("c0 durable fact criteria"),
+            result(query),
+        ];
+
+        let fused = reciprocal_rank_fusion(query, &keyword, &vector, 0.4, 60.0);
+
+        assert_eq!(fused[0].name, query);
+        assert!(
+            (fused[0].similarity - 1.0).abs() < 1e-6,
+            "exact match should score 1.0, got {}",
+            fused[0].similarity
+        );
+    }
+
+    #[test]
+    fn rank_one_in_both_normalizes_to_one() {
+        let keyword = vec![result("alpha"), result("beta")];
+        let vector = vec![result("alpha"), result("gamma")];
+
+        let fused = reciprocal_rank_fusion("unrelated query", &keyword, &vector, 0.4, 60.0);
+
+        let alpha = fused.iter().find(|r| r.name == "alpha").unwrap();
+        assert!(
+            (alpha.similarity - 1.0).abs() < 1e-6,
+            "rank-1 in both lists should normalize to 1.0, got {}",
+            alpha.similarity
+        );
+    }
+
+    #[test]
+    fn single_list_hits_reflect_alpha_weighting() {
+        // "kw" only appears in keyword results, "vec" only in vector results.
+        let keyword = vec![result("kw")];
+        let vector = vec![result("vec")];
+
+        let fused = reciprocal_rank_fusion("unrelated query", &keyword, &vector, 0.4, 60.0);
+
+        let kw = fused.iter().find(|r| r.name == "kw").unwrap();
+        let vec = fused.iter().find(|r| r.name == "vec").unwrap();
+
+        // keyword-only-#1 -> alpha, vector-only-#1 -> (1 - alpha).
+        assert!((kw.similarity - 0.4).abs() < 1e-6, "got {}", kw.similarity);
+        assert!(
+            (vec.similarity - 0.6).abs() < 1e-6,
+            "got {}",
+            vec.similarity
+        );
+        // And the noise floor is well-separated from a perfect hit.
+        assert!(vec.similarity < 1.0 && kw.similarity < 1.0);
+    }
+
+    #[test]
+    fn scores_are_clamped_to_one() {
+        let fused = reciprocal_rank_fusion("q", &[result("alpha")], &[result("alpha")], 0.4, 60.0);
+        assert!(fused.iter().all(|r| r.similarity <= 1.0));
+    }
 }
