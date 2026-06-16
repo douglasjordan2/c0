@@ -1283,11 +1283,11 @@ async fn main() -> Result<()> {
                 if let Some(ref target) = to
                     && !ctx.namespaces.contains(target)
                 {
-                    eprintln!(
-                        "Error: '{}' is not in the namespace chain {:?}",
-                        target, ctx.namespaces
+                    anyhow::bail!(
+                        "'{}' is not in the namespace chain {:?}",
+                        target,
+                        ctx.namespaces
                     );
-                    return Ok(());
                 }
 
                 let embed_text = match &description {
@@ -1381,17 +1381,14 @@ async fn main() -> Result<()> {
                 valid_at,
             } => {
                 if file.is_none() && content.is_none() {
-                    eprintln!(
-                        "Error: a patch needs content. Pass --file <path> or --content <text>."
+                    anyhow::bail!(
+                        "a patch needs content. Pass --file <path> or --content <text>.\n       (a patch with neither renders empty on walk)"
                     );
-                    eprintln!("       (a patch with neither renders empty on walk)");
-                    return Ok(());
                 }
                 if let Some(f) = &file {
                     let expanded = shellexpand::tilde(f).to_string();
                     if !std::path::Path::new(&expanded).exists() {
-                        eprintln!("Error: --file not found: {f}");
-                        return Ok(());
+                        anyhow::bail!("--file not found: {f}");
                     }
                 }
 
@@ -1400,11 +1397,11 @@ async fn main() -> Result<()> {
                 if let Some(ref target) = to
                     && !ctx.namespaces.contains(target)
                 {
-                    eprintln!(
-                        "Error: '{}' is not in the namespace chain {:?}",
-                        target, ctx.namespaces
+                    anyhow::bail!(
+                        "'{}' is not in the namespace chain {:?}",
+                        target,
+                        ctx.namespaces
                     );
-                    return Ok(());
                 }
 
                 let valid_at_dt = valid_at
