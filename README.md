@@ -194,6 +194,18 @@ c0 reflector notify     # emit a summary of the queue state
 c0 reflector clear      # empty the inbox / pending queues
 ```
 
+**Draining a backlog by hand** — when dead ends have piled up and you want them in the graph now:
+
+```bash
+c0 reflector status     # see how many are waiting
+c0 reflector process    # classify them (local Ollama by default)
+c0 reflector proposed   # eyeball what it wants to COMMIT
+c0 reflector apply      # commit the good ones
+c0 reflector review     # walk anything it left QUEUE'd for you
+```
+
+Easier still: hand the backlog to your terminal agent and let it drive these commands while you decide. Something like *"walk me through the reflector inbox interactively"* turns the chore into a conversation — the agent runs `process`, reads back what it wants to COMMIT, and you approve or redirect each call without memorizing the sequence.
+
 > Classification runs on a **local Ollama model by default** (`hermes3:8b`) — no key, no cloud, reusing the Ollama you already run for embeddings. Want Claude's higher-quality judgment instead? Set `[claude] enabled = true` and provide `ANTHROPIC_API_KEY`.
 
 ## Architecture notes
