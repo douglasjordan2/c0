@@ -416,9 +416,7 @@ pub async fn run(interval: &str, apply_commits: bool) -> Result<()> {
         if let Err(e) = process().await {
             eprintln!("process failed: {e}");
         }
-        if apply_commits
-            && let Err(e) = apply()
-        {
+        if apply_commits && let Err(e) = apply() {
             eprintln!("apply failed: {e}");
         }
         tokio::time::sleep(period).await;

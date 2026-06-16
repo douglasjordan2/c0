@@ -969,10 +969,9 @@ async fn main() -> Result<()> {
                 ReflectorCommands::Clear => reflector::clear()?,
                 ReflectorCommands::Process => reflector::process().await?,
                 ReflectorCommands::Notify => reflector::notify().await?,
-                ReflectorCommands::Run {
-                    interval,
-                    no_apply,
-                } => reflector::run(&interval, !no_apply).await?,
+                ReflectorCommands::Run { interval, no_apply } => {
+                    reflector::run(&interval, !no_apply).await?
+                }
             }
             return Ok(());
         }
