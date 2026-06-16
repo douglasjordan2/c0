@@ -347,6 +347,15 @@ enum ReflectorCommands {
     Clear,
     Process,
     Notify,
+    /// Run the loop continuously: classify the inbox, apply commits, then sleep.
+    Run {
+        /// How often to tick, e.g. 30s, 5m, 1h (a bare number means seconds).
+        #[arg(long, default_value = "1h")]
+        interval: String,
+        /// Classify only; leave COMMIT decisions in the queue for human review.
+        #[arg(long)]
+        no_apply: bool,
+    },
 }
 
 #[cfg(feature = "sessions")]
@@ -960,6 +969,10 @@ async fn main() -> Result<()> {
                 ReflectorCommands::Clear => reflector::clear()?,
                 ReflectorCommands::Process => reflector::process().await?,
                 ReflectorCommands::Notify => reflector::notify().await?,
+                ReflectorCommands::Run {
+                    interval,
+                    no_apply,
+                } => reflector::run(&interval, !no_apply).await?,
             }
             return Ok(());
         }
