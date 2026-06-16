@@ -373,6 +373,56 @@ pub fn apply() -> Result<()> {
     Ok(())
 }
 
+/// Parse a watch interval like `30s`, `5m`, `1h`. A bare number means seconds.
+fn parse_interval(spec: &str) -> Result<Duration> {
+    let spec = spec.trim();
+    let (digits, mult) = match spec.chars().last() {
+        Some('s') => (&spec[..spec.len() - 1], 1),
+        Some('m') => (&spec[..spec.len() - 1], 60),
+        Some('h') => (&spec[..spec.len() - 1], 3600),
+        _ => (spec, 1),
+    };
+
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid interval '{spec}' (use e.g. 30s, 5m, 1h)"))?;
+    if n == 0 {
+        anyhow::bail!("interval must be greater than zero");
+    }
+
+    Ok(Duration::from_secs(n.saturating_mul(mult)))
+}
+
+/// Watch mode: classify the inbox, optionally apply commits, sleep, repeat.
+///
+/// Runs until interrupted (Ctrl-C). For an unattended setup, prefer a cron
+/// entry or a systemd unit — the OS handles restarts and logging.
+pub async fn run(interval: &str, apply_commits: bool) -> Result<()> {
+    let period = parse_interval(interval)?;
+
+    println!("c0 reflector watch — ticking every {interval} (Ctrl-C to stop)");
+    println!(
+        "Auto-apply: {}",
+        if apply_commits {
+            "on"
+        } else {
+            "off (COMMIT decisions stay in the review queue)"
+        }
+    );
+    println!("═══════════════════════════════════════");
+
+    loop {
+        if let Err(e) = process().await {
+            eprintln!("process failed: {e}");
+        }
+        if apply_commits && let Err(e) = apply() {
+            eprintln!("apply failed: {e}");
+        }
+        tokio::time::sleep(period).await;
+    }
+}
+
 const CLASSIFY_PROMPT: &str = r#"You are a knowledge system curator. Classify this dead-end query (a search that found nothing in the knowledge graph).
 
 Query: {query}

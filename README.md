@@ -34,7 +34,7 @@ query ──▶ ❶ exact match ─▶ ❷ keyword (BM25) ─▶ ❸ hybrid (BM2
 - **Graph storage (Neo4j).** Knowledge lives as `Concept` nodes and typed relationships, not as text chunks — so retrieval can *traverse* from one idea to related ones.
 - **Hybrid retrieval.** A tiered cascade: exact match → keyword (Lucene/BM25) → **hybrid**, which runs keyword *and* vector search and merges them with **Reciprocal Rank Fusion (RRF)**. Keyword nails exact names and identifiers; vectors catch synonyms and paraphrase; fusion gets the best of both without normalizing incompatible score scales.
 - **Bi-temporal.** Every concept carries two independent timestamps — when it was *recorded* (transaction time) and when it is *true* (valid time) — so you can run point-in-time ("as-of") queries, **supersede** a concept when it evolves, or **invalidate** it with a causal audit trail. Nothing is deleted; it's time-bounded.
-- **Self-improving reflection loop.** When a lookup finds nothing, the dead end is queued, and an LLM classifies it: **commit** a genuinely new, reusable concept, **discard** noise, or **queue** the uncertain ones for human review.
+- **Self-improving reflection loop.** When a lookup finds nothing, the dead end is queued, and an LLM classifies it: **commit** a genuinely new, reusable concept, **discard** noise, or **queue** the uncertain ones for human review. Run it continuously (`c0 reflector run`) and c0 fills its own memory gaps as you work — [details below](#the-reflection-loop--c0s-learning-engine).
 
 ## Requirements
 
@@ -88,7 +88,7 @@ c0 walk "reciprocal rank fusion"                             # traverses outgoin
 | `c0 supersede <old> --with <new>` | Mark a concept evolved into a newer one |
 | `c0 invalidate concept <name> --reason "<why>"` | Retract a concept with a causal trail |
 | `c0 describe <concept> "<new desc>"` | Update a description (and re-embed) |
-| `c0 reflector ...` | Inspect/process the dead-end → learn loop |
+| `c0 reflector run` | Run the learning loop: classify dead ends → commit new concepts (see [below](#the-reflection-loop--c0s-learning-engine)) |
 | `c0 health --fix` | Check Neo4j / Ollama / indexes |
 | `c0 export` · `c0 audit` · `c0 move` | Maintenance utilities |
 
@@ -134,6 +134,51 @@ cargo install --path . --features sessions
 ```
 
 This is the reference example of c0's **source-adapter** pattern — the same shape any "fill the graph from <source>" integration would take.
+
+## The reflection loop — c0's learning engine
+
+This is the part that makes c0 *memory* rather than a database: it learns from what it **fails** to find. Every time `c0 walk` comes up empty, that query is recorded as a dead end (`~/.c0/reflector/inbox.jsonl`). The reflection loop turns those misses into knowledge — an LLM classifies each one:
+
+- **COMMIT** — a genuinely new, reusable concept worth adding to the graph
+- **DISCARD** — noise (typos, test queries, local paths)
+- **QUEUE** — uncertain; leave it for a human to judge
+
+Run unattended, this is a flywheel: the more you use c0, the more the gaps in its memory get noticed, classified, and filled — so the *next* lookup that would have missed now hits.
+
+### Run it (the whole point)
+
+The loop only pays off if it runs regularly. The simplest way is the built-in watch mode — it classifies the inbox, applies the commits, sleeps, and repeats:
+
+```bash
+c0 reflector run                      # tick every hour, auto-commit the COMMITs
+c0 reflector run --interval 15m       # tick more often
+c0 reflector run --no-apply           # classify only; hold COMMITs for human review
+```
+
+For an always-on, unattended setup, prefer the OS scheduler over a long-lived process — cron and systemd handle restarts and logging for you:
+
+```cron
+# Classify dead ends every hour and auto-commit. Keep a human in the loop?
+# Drop the "&& c0 reflector apply" and run `c0 reflector review` when you check in.
+0 * * * * c0 reflector process && c0 reflector apply
+```
+
+### Inspect and steer it
+
+The loop is intentionally two-staged (`process` → `apply`) so nothing touches the graph until you say so:
+
+```bash
+c0 reflector status     # how many dead ends are waiting, proposed, or queued
+c0 reflector process    # LLM classifies the inbox (writes pending commits + review queue)
+c0 reflector proposed   # preview the concepts it wants to COMMIT
+c0 reflector apply      # add the pending concepts to the graph
+c0 reflector review     # walk the QUEUE'd items interactively
+c0 reflector inbox      # show the raw dead-end inbox
+c0 reflector notify     # emit a summary of the queue state
+c0 reflector clear      # empty the inbox / pending queues
+```
+
+> Classification uses `ANTHROPIC_API_KEY`. Without it, dead ends still accumulate in the inbox — you just can't auto-classify them until a key is set.
 
 ## Architecture notes
 
