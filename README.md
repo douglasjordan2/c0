@@ -120,6 +120,8 @@ The heavier work is **optional and runs in the background**. The reflection loop
 
 The short version: the embedding hot path is light enough for any laptop, and the only reason to add a GPU is to make the *optional* local LLM work faster — never to make c0 usable in the first place.
 
+> **On a slow CPU-only host, watch the enrichment timeout.** Recall stays fast (embeddings are tiny), but enriching a *large* session can take minutes — and if a single call exceeds the per-request timeout (default 600 s) it fails with `TimedOut`. If you hit that: raise it with `C0_ENRICH_TIMEOUT_SECS`, do less per call (`C0_ENRICH_MAX_CONCEPTS`, `C0_ENRICH_TEXT_BUDGET`, or a smaller `--limit`), or use a faster/smaller model. And if you schedule several LLM jobs (enrich, extract, the reflector), serialize them — e.g. wrap each in a shared `flock` — so they don't dogpile Ollama's single-threaded queue, where a *waiting* request still burns its timeout.
+
 ## Using c0 with Claude Code
 
 c0 pays off most when you treat the **graph as where knowledge lives** and keep your `CLAUDE.md` for **protocol** — the instruction to consult c0, plus your own house rules. Project facts, API shapes, and architecture decisions go stale fast and bloat every prompt when hard-coded into `CLAUDE.md`; put them in the graph instead and let the model pull the relevant subgraph on demand, then *correct* it over time with patches and supersessions.
