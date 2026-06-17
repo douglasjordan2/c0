@@ -533,6 +533,27 @@ fn discover_patch_dirs(
     }
 }
 
+/// Render a patch's body. A `--file` ref wins (live re-read keeps refresh
+/// semantics) but falls back to the inline `content` copy if the file moved or
+/// was deleted, instead of leaving the patch as `[Error reading …]`.
+fn print_patch_body(patch: &graph::Patch) {
+    let body = patch
+        .file
+        .as_ref()
+        .and_then(|f| std::fs::read_to_string(shellexpand::tilde(f).as_ref()).ok())
+        .or_else(|| patch.content.clone());
+    match body {
+        Some(c) => println!("{c}"),
+        None => match &patch.file {
+            Some(f) => println!(
+                "[patch '{}': could not read {f} and no inline content]",
+                patch.name
+            ),
+            None => println!("[patch '{}' has no readable content]", patch.name),
+        },
+    }
+}
+
 fn read_triggers(ctx: &config::NamespaceContext) -> Vec<String> {
     let files = config::get_triggers_files(ctx);
     let mut triggers = Vec::new();
@@ -795,6 +816,25 @@ impl Drop for CmdGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // When output is piped to a reader that closes early (`c0 walk | grep -q`,
+    // `| head`), the next `println!` fails with EPIPE and the default hook
+    // panics with a noisy "failed printing to stdout: Broken pipe" backtrace.
+    // Rust ignores SIGPIPE at startup, and `unsafe_code = "forbid"` rules out
+    // restoring SIG_DFL, so swallow that one panic and exit cleanly instead.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false))
         .with(
@@ -1422,7 +1462,7 @@ async fn main() -> Result<()> {
                 )
                 .await?;
                 println!("Created patch: {name} [{target_namespace}]");
-                if let Some(c) = corrects {
+                if let Some(c) = &corrects {
                     println!("  corrects: {c}");
                 }
                 if let Some(f) = &file {
@@ -1436,6 +1476,27 @@ async fn main() -> Result<()> {
                 }
                 if let Some(v) = &valid_at {
                     println!("  valid_at: {v}");
+                }
+
+                // A patch with no --corrects has no HAS_PATCH/CORRECTS edge, so
+                // `c0 walk` (which traverses those edges only) can never reach
+                // it — it would surface in `c0 search` alone. Anchor it to the
+                // active namespace's concept so it's reachable from
+                // `c0 walk <namespace>`.
+                if corrects.is_none() {
+                    if graph::concept_exists(&graph_conn, target_namespace, &ctx.namespaces).await?
+                    {
+                        graph::link_patch(&graph_conn, &name, target_namespace, &ctx.namespaces)
+                            .await?;
+                        println!("  linked: {target_namespace} -[HAS_PATCH]-> {name}");
+                    } else {
+                        println!(
+                            "  note: no '{target_namespace}' concept exists yet, so this patch \
+                             is reachable via `c0 search` but not `c0 walk`. Create the concept \
+                             (`c0 add concept {target_namespace}`) then `c0 relate \
+                             {target_namespace} HAS_PATCH {name}`, or re-add with --corrects."
+                        );
+                    }
                 }
             }
         },
@@ -1580,15 +1641,7 @@ async fn main() -> Result<()> {
                     if let Some(ref url) = patch.url {
                         println!("📎 {url}");
                     }
-                    if let Some(file) = patch.file {
-                        let expanded = shellexpand::tilde(&file);
-                        match std::fs::read_to_string(expanded.as_ref()) {
-                            Ok(content) => println!("{content}"),
-                            Err(e) => println!("[Error reading {file}: {e}]"),
-                        }
-                    } else if let Some(content) = patch.content {
-                        println!("{content}");
-                    }
+                    print_patch_body(&patch);
                 }
                 println!("---");
             }
@@ -1655,15 +1708,7 @@ async fn main() -> Result<()> {
                         if let Some(ref url) = patch.url {
                             println!("📎 {url}");
                         }
-                        if let Some(file) = patch.file {
-                            let expanded = shellexpand::tilde(&file);
-                            match std::fs::read_to_string(expanded.as_ref()) {
-                                Ok(content) => println!("{content}"),
-                                Err(e) => println!("[Error reading {file}: {e}]"),
-                            }
-                        } else if let Some(content) = patch.content {
-                            println!("{content}");
-                        }
+                        print_patch_body(&patch);
                         println!("---");
                     }
                 }

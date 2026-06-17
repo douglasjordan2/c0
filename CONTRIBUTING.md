@@ -17,6 +17,22 @@ You'll need Rust (2024 edition / 1.85+), Docker, and Ollama. An `ANTHROPIC_API_K
 
 ## Before you open a PR
 
+Run the exact CI pipeline locally — `scripts/ci.sh` mirrors `.github/workflows/ci.yml`:
+
+```bash
+./scripts/ci.sh   # fmt --check, clippy, default + sessions builds, tests
+```
+
+Or enable the git hooks once so this runs automatically (fast checks on commit, full pipeline on push):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+- `pre-commit` runs `cargo fmt --all --check` + `cargo clippy` (seconds).
+- `pre-push` runs the full `scripts/ci.sh`.
+
+What CI enforces:
 - `cargo fmt --all` — the CI checks formatting.
 - `cargo clippy --all-features` — keep it clean. The crate forbids `unsafe` and lints with
   Clippy `pedantic`.
