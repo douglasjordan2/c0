@@ -539,12 +539,24 @@ pub async fn add_patch(
         "p.expired_at = null".to_string(),
     ];
 
+    // Inline a durable copy of the body. The --file live re-read still wins at
+    // render time (keeping refresh semantics), but persisting the content means
+    // the patch survives the source file moving or being deleted, and makes
+    // file-only patches searchable — the fulltext index covers p.content, not
+    // the file on disk. Explicit --content always takes precedence.
+    let inlined: Option<String> = match content {
+        Some(c) => Some(c.to_string()),
+        None => abs_file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok()),
+    };
+
     if let Some(f) = &abs_file {
         params.push(("file", f.clone()));
         sets.push("p.patch_file = $file".to_string());
     }
-    if let Some(c) = content {
-        params.push(("content", c.to_string()));
+    if let Some(c) = &inlined {
+        params.push(("content", c.clone()));
         sets.push("p.content = $content".to_string());
     }
     if let Some(s) = source {
@@ -695,6 +707,22 @@ pub async fn list_patches(
         patches.push((name, file, corrects, namespace));
     }
     Ok(patches)
+}
+
+/// Exact-name existence check for a concept within the given namespaces.
+/// Unlike `search_concepts` (a substring match), this matches `name` exactly.
+pub async fn concept_exists(graph: &Graph, name: &str, namespaces: &[String]) -> Result<bool> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name}) WHERE c.namespace IN $namespaces
+                 RETURN c.name AS name LIMIT 1",
+            )
+            .param("name", name)
+            .param("namespaces", namespaces.to_vec()),
+        )
+        .await?;
+    Ok(result.next().await?.is_some())
 }
 
 pub async fn search_concepts(
