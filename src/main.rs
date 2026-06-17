@@ -1484,7 +1484,8 @@ async fn main() -> Result<()> {
                 // active namespace's concept so it's reachable from
                 // `c0 walk <namespace>`.
                 if corrects.is_none() {
-                    if graph::concept_exists(&graph_conn, target_namespace, &ctx.namespaces).await? {
+                    if graph::concept_exists(&graph_conn, target_namespace, &ctx.namespaces).await?
+                    {
                         graph::link_patch(&graph_conn, &name, target_namespace, &ctx.namespaces)
                             .await?;
                         println!("  linked: {target_namespace} -[HAS_PATCH]-> {name}");
