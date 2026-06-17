@@ -816,6 +816,25 @@ impl Drop for CmdGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // When output is piped to a reader that closes early (`c0 walk | grep -q`,
+    // `| head`), the next `println!` fails with EPIPE and the default hook
+    // panics with a noisy "failed printing to stdout: Broken pipe" backtrace.
+    // Rust ignores SIGPIPE at startup, and `unsafe_code = "forbid"` rules out
+    // restoring SIG_DFL, so swallow that one panic and exit cleanly instead.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false))
         .with(
