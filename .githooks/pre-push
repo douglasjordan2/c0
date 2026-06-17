@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Full local CI before pushing: fmt, clippy, default + sessions builds, tests.
+# Mirrors .github/workflows/ci.yml exactly via scripts/ci.sh.
+#
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+exec "$(git rev-parse --show-toplevel)/scripts/ci.sh"
