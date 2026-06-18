@@ -1,0 +1,24 @@
+# Builds the c0 binary (with the sessions feature) for the live integration
+# harness. Run via docker-compose.test.yml / scripts/docker-test.sh — it brings
+# up a real Neo4j + Ollama alongside this image and runs scripts/integration-test.sh.
+FROM rust:1-bookworm
+
+# curl: wait-for-deps + pulling the embedding model over Ollama's HTTP API.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /c0
+
+# Compile from manifests + source first so that editing the test scripts or
+# fixtures below doesn't invalidate the (slow) build layer.
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --features sessions
+ENV PATH="/c0/target/debug:${PATH}"
+
+# Harness scripts + fixtures — copied last for fast iteration.
+COPY scripts ./scripts
+COPY tests ./tests
+
+CMD ["bash", "scripts/integration-test.sh"]

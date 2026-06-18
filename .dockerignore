@@ -1,0 +1,6 @@
+# Keep the Docker build context small. The integration image (Dockerfile.test)
+# only needs the Cargo manifests, src/, scripts/, and tests/.
+target/
+assets/
+.git/
+.github/
