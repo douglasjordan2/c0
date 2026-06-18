@@ -327,9 +327,16 @@ pub fn apply() -> Result<()> {
                 println!("  Reason: {reason}");
             }
 
-            let result = Command::new("c0")
-                .args(["add", "concept", concept])
-                .output();
+            // Pass --force so the fuzzy-duplicate guard in `add concept` can't
+            // silently skip (exit 0 without creating) the concept the classifier
+            // already decided to COMMIT. Pass the reason as the description so the
+            // new node gets an embedding and is actually retrievable.
+            let mut args: Vec<&str> = vec!["add", "concept", concept, "--force"];
+            if !reason.is_empty() {
+                args.push("-d");
+                args.push(reason);
+            }
+            let result = Command::new("c0").args(&args).output();
 
             match result {
                 Ok(output) if output.status.success() => {
