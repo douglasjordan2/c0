@@ -383,6 +383,8 @@ async fn propose_same_namespace(
     threshold: f32,
     max_links: usize,
 ) -> Result<Vec<EnrichEdge>> {
+    // `max_links` is interpolated into the slice bound rather than passed as a
+    // param; it is a trusted `usize` from a CLI arg, never user-controlled input.
     let cypher = format!(
         "MATCH (q:Concept {{namespace: $namespace}})
          WHERE q.invalid_at IS NULL AND q.expired_at IS NULL
@@ -494,7 +496,13 @@ pub async fn enrich(
     dry_run: bool,
     json: bool,
 ) -> Result<()> {
-    let run_id = format!("enrich-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+    // Timestamp for readability + PID so two invocations in the same second
+    // (e.g. a scripted loop) can't share a run-id and clobber each other's rollback.
+    let run_id = format!(
+        "enrich-{}-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        std::process::id()
+    );
     let mut reports: Vec<EnrichReport> = Vec::new();
 
     for namespace in targets {
