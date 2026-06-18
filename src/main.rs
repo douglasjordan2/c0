@@ -472,6 +472,42 @@ enum AuditCommands {
         #[arg(long, help = "Output JSON format")]
         json: bool,
     },
+    /// Connect orphaned concepts to their nearest semantic neighbours.
+    Enrich {
+        #[arg(long, help = "Namespace to enrich (defaults to current)")]
+        namespace: Option<String>,
+        #[arg(long, short, help = "Enrich every known namespace")]
+        all: bool,
+        #[arg(
+            long,
+            default_value = "0.82",
+            help = "Min cosine similarity for same-namespace links"
+        )]
+        same_threshold: f32,
+        #[arg(
+            long,
+            default_value = "0.90",
+            help = "Min cosine similarity for a cross-namespace bridge"
+        )]
+        cross_threshold: f32,
+        #[arg(
+            long,
+            default_value = "2",
+            help = "Max same-namespace links added per orphan"
+        )]
+        max_links: usize,
+        #[arg(long, help = "Show proposed edges without writing them")]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Delete auto-enriched edges; optionally pass a run-id (default: most recent)",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        rollback: Option<String>,
+        #[arg(long, help = "Output JSON format")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3114,6 +3150,41 @@ async fn main() -> Result<()> {
                     println!();
                 }
                 audit::namespaces(&graph_conn, &ctx.namespaces, false, json).await?;
+            }
+            AuditCommands::Enrich {
+                namespace,
+                all,
+                same_threshold,
+                cross_threshold,
+                max_links,
+                dry_run,
+                rollback,
+                json,
+            } => {
+                if let Some(run) = rollback {
+                    let run = if run.is_empty() {
+                        None
+                    } else {
+                        Some(run.as_str())
+                    };
+                    audit::enrich_rollback(&graph_conn, run, json).await?;
+                } else {
+                    let targets: Vec<String> = if all {
+                        ctx.namespaces.clone()
+                    } else {
+                        vec![namespace.unwrap_or_else(|| ctx.namespace.clone())]
+                    };
+                    audit::enrich(
+                        &graph_conn,
+                        &targets,
+                        same_threshold,
+                        cross_threshold,
+                        max_links,
+                        dry_run,
+                        json,
+                    )
+                    .await?;
+                }
             }
         },
         Commands::Move { what } => match what {

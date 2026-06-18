@@ -337,6 +337,328 @@ pub async fn staleness(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrichEdge {
+    pub from: String,
+    pub from_namespace: String,
+    pub to: String,
+    pub to_namespace: String,
+    pub score: f32,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrichReport {
+    pub namespace: String,
+    pub run_id: String,
+    pub dry_run: bool,
+    pub orphaned_before: i64,
+    pub orphaned_after: i64,
+    pub edges: Vec<EnrichEdge>,
+}
+
+async fn count_orphaned(graph: &Graph, namespace: &str) -> Result<i64> {
+    let q = query(
+        r"
+        MATCH (c:Concept {namespace: $namespace})
+        WHERE c.invalid_at IS NULL AND c.expired_at IS NULL
+          AND NOT (c)--(:Concept)
+        RETURN count(c) AS n
+        ",
+    )
+    .param("namespace", namespace.to_string());
+
+    let mut result = graph.execute(q).await?;
+    match result.next().await? {
+        Some(row) => Ok(row.get::<i64>("n").unwrap_or(0)),
+        None => Ok(0),
+    }
+}
+
+/// Same-namespace proposals: each orphan's nearest in-namespace neighbours
+/// at or above `threshold`, capped at `max_links` per orphan.
+async fn propose_same_namespace(
+    graph: &Graph,
+    namespace: &str,
+    threshold: f32,
+    max_links: usize,
+) -> Result<Vec<EnrichEdge>> {
+    // `max_links` is interpolated into the slice bound rather than passed as a
+    // param; it is a trusted `usize` from a CLI arg, never user-controlled input.
+    let cypher = format!(
+        "MATCH (q:Concept {{namespace: $namespace}})
+         WHERE q.invalid_at IS NULL AND q.expired_at IS NULL
+           AND q.embedding IS NOT NULL AND NOT (q)--(:Concept)
+         CALL db.index.vector.queryNodes('concept_embedding', 8, q.embedding)
+           YIELD node, score
+         WHERE node.name <> q.name AND score >= $threshold
+           AND node.invalid_at IS NULL AND node.expired_at IS NULL
+           AND node.namespace = q.namespace
+         WITH q, node, score ORDER BY score DESC
+         WITH q, collect({{n: node.name, s: score}})[0..{max_links}] AS top
+         UNWIND top AS t
+         RETURN q.name AS from, t.n AS to, t.s AS score"
+    );
+
+    let mut result = graph
+        .execute(
+            query(&cypher)
+                .param("namespace", namespace.to_string())
+                .param("threshold", f64::from(threshold)),
+        )
+        .await?;
+
+    let mut edges = Vec::new();
+    while let Some(row) = result.next().await? {
+        edges.push(EnrichEdge {
+            from: row.get::<String>("from").unwrap_or_default(),
+            from_namespace: namespace.to_string(),
+            to: row.get::<String>("to").unwrap_or_default(),
+            to_namespace: namespace.to_string(),
+            score: row.get::<f64>("score").unwrap_or(0.0) as f32,
+            kind: "same".to_string(),
+        });
+    }
+    Ok(edges)
+}
+
+/// Cross-namespace bridges: a single highest-scoring neighbour in another
+/// namespace at or above `threshold`, for orphans with no same-namespace match.
+async fn propose_cross_namespace(
+    graph: &Graph,
+    namespace: &str,
+    threshold: f32,
+) -> Result<Vec<EnrichEdge>> {
+    let q = query(
+        r"
+        MATCH (q:Concept {namespace: $namespace})
+        WHERE q.invalid_at IS NULL AND q.expired_at IS NULL
+          AND q.embedding IS NOT NULL AND NOT (q)--(:Concept)
+        CALL db.index.vector.queryNodes('concept_embedding', 8, q.embedding)
+          YIELD node, score
+        WHERE node.name <> q.name AND score >= $threshold
+          AND node.invalid_at IS NULL AND node.expired_at IS NULL
+          AND node.namespace <> q.namespace
+        WITH q, node, score ORDER BY score DESC
+        WITH q, collect({n: node.name, ns: node.namespace, s: score})[0] AS best
+        RETURN q.name AS from, best.n AS to, best.ns AS to_namespace, best.s AS score
+        ",
+    )
+    .param("namespace", namespace.to_string())
+    .param("threshold", f64::from(threshold));
+
+    let mut result = graph.execute(q).await?;
+    let mut edges = Vec::new();
+    while let Some(row) = result.next().await? {
+        edges.push(EnrichEdge {
+            from: row.get::<String>("from").unwrap_or_default(),
+            from_namespace: namespace.to_string(),
+            to: row.get::<String>("to").unwrap_or_default(),
+            to_namespace: row.get::<String>("to_namespace").unwrap_or_default(),
+            score: row.get::<f64>("score").unwrap_or(0.0) as f32,
+            kind: "cross".to_string(),
+        });
+    }
+    Ok(edges)
+}
+
+/// Create one tagged RELATED_TO edge. Returns true if a new edge was written.
+async fn apply_edge(graph: &Graph, edge: &EnrichEdge, run_id: &str) -> Result<bool> {
+    let q = query(
+        r"
+        MATCH (a:Concept {name: $from, namespace: $from_ns}),
+              (b:Concept {name: $to, namespace: $to_ns})
+        MERGE (a)-[r:RELATED_TO]->(b)
+        ON CREATE SET r.auto_enriched = true, r.enrich_score = $score, r.enrich_run = $run
+        RETURN r.enrich_run = $run AS created
+        ",
+    )
+    .param("from", edge.from.clone())
+    .param("from_ns", edge.from_namespace.clone())
+    .param("to", edge.to.clone())
+    .param("to_ns", edge.to_namespace.clone())
+    .param("score", f64::from(edge.score))
+    .param("run", run_id.to_string());
+
+    let mut result = graph.execute(q).await?;
+    match result.next().await? {
+        Some(row) => Ok(row.get::<bool>("created").unwrap_or(false)),
+        None => Ok(false),
+    }
+}
+
+pub async fn enrich(
+    graph: &Graph,
+    targets: &[String],
+    same_threshold: f32,
+    cross_threshold: f32,
+    max_links: usize,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    // Timestamp for readability + PID so two invocations in the same second
+    // (e.g. a scripted loop) can't share a run-id and clobber each other's rollback.
+    let run_id = format!(
+        "enrich-{}-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        std::process::id()
+    );
+    let mut reports: Vec<EnrichReport> = Vec::new();
+
+    for namespace in targets {
+        let before = count_orphaned(graph, namespace).await?;
+
+        let same = propose_same_namespace(graph, namespace, same_threshold, max_links).await?;
+        // A cross-namespace bridge is a fallback only for orphans with no
+        // in-namespace match, mirroring the original enrichment script.
+        let covered: std::collections::HashSet<String> =
+            same.iter().map(|e| e.from.clone()).collect();
+        let cross: Vec<EnrichEdge> = propose_cross_namespace(graph, namespace, cross_threshold)
+            .await?
+            .into_iter()
+            .filter(|e| !covered.contains(&e.from))
+            .collect();
+
+        let mut edges: Vec<EnrichEdge> = same;
+        edges.extend(cross);
+
+        if !dry_run {
+            let mut written = Vec::with_capacity(edges.len());
+            for edge in edges {
+                if apply_edge(graph, &edge, &run_id).await? {
+                    written.push(edge);
+                }
+            }
+            edges = written;
+        }
+
+        let after = if dry_run {
+            before
+        } else {
+            count_orphaned(graph, namespace).await?
+        };
+
+        reports.push(EnrichReport {
+            namespace: namespace.clone(),
+            run_id: run_id.clone(),
+            dry_run,
+            orphaned_before: before,
+            orphaned_after: after,
+            edges,
+        });
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+        return Ok(());
+    }
+
+    println!(
+        "C0 Orphan Enrichment{}",
+        if dry_run { " (dry run)" } else { "" }
+    );
+    println!("═══════════════════════════════════════");
+    let mut total_before = 0;
+    let mut total_after = 0;
+    let mut total_edges = 0;
+    for r in &reports {
+        let same_n = r.edges.iter().filter(|e| e.kind == "same").count();
+        let cross_n = r.edges.iter().filter(|e| e.kind == "cross").count();
+        total_before += r.orphaned_before;
+        total_after += r.orphaned_after;
+        total_edges += r.edges.len();
+        if dry_run {
+            println!(
+                "  {} - {} orphaned, would add {} edges ({} same-ns, {} cross-ns)",
+                r.namespace,
+                r.orphaned_before,
+                r.edges.len(),
+                same_n,
+                cross_n
+            );
+        } else {
+            println!(
+                "  {} - {} → {} orphaned, +{} edges ({} same-ns, {} cross-ns)",
+                r.namespace,
+                r.orphaned_before,
+                r.orphaned_after,
+                r.edges.len(),
+                same_n,
+                cross_n
+            );
+        }
+    }
+
+    println!();
+    println!("═══════════════════════════════════════");
+    if dry_run {
+        println!("Total: {total_before} orphaned, would add {total_edges} edges");
+        println!("Re-run without --dry-run to apply.");
+    } else {
+        println!(
+            "Total orphaned: {total_before} → {total_after}  (+{total_edges} edges, run-id: {run_id})"
+        );
+        println!("Rollback: c0 audit enrich --rollback {run_id}");
+    }
+
+    Ok(())
+}
+
+pub async fn enrich_rollback(graph: &Graph, run: Option<&str>, json: bool) -> Result<()> {
+    let run_id = match run {
+        Some(r) => r.to_string(),
+        None => {
+            let q = query(
+                r"
+                MATCH ()-[r:RELATED_TO {auto_enriched: true}]->()
+                WHERE r.enrich_run IS NOT NULL
+                RETURN r.enrich_run AS run
+                ORDER BY run DESC LIMIT 1
+                ",
+            );
+            let mut result = graph.execute(q).await?;
+            match result.next().await? {
+                Some(row) => row.get::<String>("run").unwrap_or_default(),
+                None => {
+                    if json {
+                        println!("{}", serde_json::json!({"deleted": 0, "run_id": null}));
+                    } else {
+                        println!("No auto-enriched edges found to roll back.");
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let q = query(
+        r"
+        MATCH ()-[r:RELATED_TO {auto_enriched: true, enrich_run: $run}]->()
+        WITH collect(r) AS rels
+        WITH rels, size(rels) AS n
+        FOREACH (r IN rels | DELETE r)
+        RETURN n
+        ",
+    )
+    .param("run", run_id.clone());
+
+    let mut result = graph.execute(q).await?;
+    let deleted = match result.next().await? {
+        Some(row) => row.get::<i64>("n").unwrap_or(0),
+        None => 0,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"deleted": deleted, "run_id": run_id})
+        );
+    } else {
+        println!("Rolled back {deleted} edges from run {run_id}.");
+    }
+    Ok(())
+}
+
 async fn find_global_refugees(graph: &Graph, namespaces: &[String]) -> Result<Vec<NamespaceIssue>> {
     let known_prefixes: Vec<&str> = namespaces
         .iter()

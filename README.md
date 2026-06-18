@@ -108,6 +108,7 @@ c0 walk "reciprocal rank fusion"                             # traverses outgoin
 | `c0 describe <concept> "<new desc>"` | Update a description (and re-embed) |
 | `c0 reflector run` | Run the learning loop: classify dead ends → commit new concepts (see [below](#the-reflection-loop--c0s-learning-engine)) |
 | `c0 health --fix` | Check Neo4j / Ollama / indexes |
+| `c0 audit enrich` | Reconnect orphaned concepts to nearest neighbours (`--dry-run`, `--rollback`) |
 | `c0 export` · `c0 audit` · `c0 move` | Maintenance utilities |
 
 Run `c0 --help` for the full set.
