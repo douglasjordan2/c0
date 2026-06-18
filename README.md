@@ -59,7 +59,7 @@ query ──▶ ❶ exact match ─▶ ❷ keyword (BM25) ─▶ ❸ hybrid (BM2
 - **Rust** (2024 edition — 1.85+)
 - **Neo4j 5** — a `docker-compose.yml` is included
 - **[Ollama](https://ollama.com/)** for local embeddings *and* the reflection loop's classifier (defaults: `nomic-embed-text` for embeddings, `hermes3:8b` for classification) — the whole loop runs locally, no key required
-- *(optional)* an **Anthropic API key** — opt in with `[claude] enabled = true` to use Claude instead of a local model for classification/extraction (higher quality, at cost)
+- *(optional)* **Claude for the background LLM** — opt in with `[claude] enabled = true` to use Claude instead of a local model for classification/extraction, either via an **Anthropic API key** or your **Claude subscription** (the `claude` CLI). See [Configuration](#configuration)
 
 ## Quickstart
 
@@ -124,11 +124,36 @@ c0 reads connection details from the environment, with a per-namespace `.c0/conf
 
 Embedding host/model (Ollama) default to `http://localhost:11434` and `nomic-embed-text`, and are configurable.
 
+### Background LLM: local, API, or your Claude subscription
+
+The reflection loop, concept extraction, and session enrichment use a chat LLM. By default that's **local Ollama** — keyless and offline. To use Claude instead, set `[claude]` in `.c0/config.toml` to one of:
+
+**Anthropic API** — billed per token, needs `ANTHROPIC_API_KEY`:
+
+```toml
+[claude]
+enabled  = true
+provider = "claude"
+```
+
+**Your Claude subscription, via the Claude Code CLI** — no API key, no per-token cost (it shells out to `claude -p`, using whatever that CLI is logged into):
+
+```toml
+[claude]
+enabled  = true
+provider = "claude-cli"
+binaries = { claude = "claude" }   # path to your `claude` binary
+```
+
+Either way, you can route **per task** — e.g. local extraction but Claude classification — with `classification_provider`, `extraction_provider`, `enrichment_provider`, and `concept_extraction_provider`. (`droid`, `codex`, and `gemini` are supported as providers too.)
+
+> **Unattended setups:** the `claude-cli` provider only works where that CLI is **authenticated**. Interactive/desktop use is fine, but a headless `cron`/`systemd` daemon needs the CLI logged in *in that environment* or classification will fail — for always-on servers the API key (`provider = "claude"`) is the robust choice.
+
 ## Running locally (modest hardware is fine)
 
 c0's **core recall path — `walk` / `search` / `add` — needs almost nothing.** The only moving parts are Neo4j and a single small embedding model (`nomic-embed-text`, ~140M parameters, well under 1 GB), and both run comfortably **CPU-only**. No GPU, no cloud. A few gigabytes of free RAM cover the graph, the embedder, and Neo4j's page cache for a personal-scale knowledge base.
 
-The heavier work is **optional and runs in the background**. The reflection loop, concept extraction, and session enrichment use a chat LLM — and **by default that's a local Ollama model** (e.g. `qwen2.5:7b`/`:14b` for extraction/enrichment, `hermes3:8b` for classification), so the whole thing runs keyless and offline. Opt into the Anthropic API (`[claude] enabled = true`) only if you want Claude's higher-quality `haiku`/`sonnet` judgment. Because none of this is on the recall hot path, **CPU inference is fine** — a slow background tick never affects how fast `walk` feels.
+The heavier work is **optional and runs in the background**. The reflection loop, concept extraction, and session enrichment use a chat LLM — and **by default that's a local Ollama model** (e.g. `qwen2.5:7b`/`:14b` for extraction/enrichment, `hermes3:8b` for classification), so the whole thing runs keyless and offline. Opt into Claude (`[claude] enabled = true`) only if you want its higher-quality `haiku`/`sonnet` judgment — via the Anthropic API or your Claude subscription's `claude` CLI ([Configuration](#configuration)). Because none of this is on the recall hot path, **CPU inference is fine** — a slow background tick never affects how fast `walk` feels.
 
 | If you want… | You need | Notes |
 |---|---|---|
@@ -282,7 +307,7 @@ c0 reflector review     # walk anything it left QUEUE'd for you
 
 Easier still: hand the backlog to your terminal agent and let it drive these commands while you decide. Something like *"walk me through the reflector inbox interactively"* turns the chore into a conversation — the agent runs `process`, reads back what it wants to COMMIT, and you approve or redirect each call without memorizing the sequence.
 
-> Classification runs on a **local Ollama model by default** (`hermes3:8b`) — no key, no cloud, reusing the Ollama you already run for embeddings. Want Claude's higher-quality judgment instead? Set `[claude] enabled = true` and provide `ANTHROPIC_API_KEY`.
+> Classification runs on a **local Ollama model by default** (`hermes3:8b`) — no key, no cloud, reusing the Ollama you already run for embeddings. Want Claude's higher-quality judgment instead? Point `[claude]` at the Anthropic API *or* your Claude subscription's `claude` CLI — see [Configuration](#configuration).
 
 ## Architecture notes
 
