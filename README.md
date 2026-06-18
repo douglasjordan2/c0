@@ -27,7 +27,7 @@ query ──▶ ❶ exact match ─▶ ❷ keyword (BM25) ─▶ ❸ hybrid (BM2
                                                           ▼
                                      traverse the graph for related context  ──▶  answer
                                                           │
-                                              (no match) ▼
+                                               (no match) ▼
                                           reflection loop: learn from the miss
 ```
 
