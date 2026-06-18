@@ -181,6 +181,25 @@ pub struct SessionAggregates {
     pub total_tool_calls: i64,
 }
 
+#[cfg(feature = "sessions")]
+#[derive(Debug, Clone)]
+pub struct EnrichmentTurn {
+    pub role: String,
+    pub text: String,
+    pub tool_use_count: i64,
+    pub embedding: Option<Vec<f32>>,
+}
+
+#[cfg(feature = "sessions")]
+#[derive(Debug, Clone, Default)]
+pub struct EnrichmentInputs {
+    pub summary: Option<String>,
+    pub turns: Vec<EnrichmentTurn>,
+    pub reflections: Vec<String>,
+    pub files: Vec<String>,
+    pub commands: Vec<String>,
+}
+
 pub async fn connect() -> Result<Graph> {
     let (uri, user, password) = neo4j_config();
     let graph = Graph::new(&uri, &user, &password).await?;
@@ -3525,72 +3544,116 @@ pub async fn get_unenriched_sessions(
 }
 
 #[cfg(feature = "sessions")]
-pub async fn get_session_text_for_enrichment(
+pub async fn get_session_enrichment_inputs(
     graph: &Graph,
     session_id: &str,
-    include_reflections: bool,
-    max_chars: usize,
-) -> Result<String> {
-    let mut buf = String::new();
+) -> Result<EnrichmentInputs> {
+    let mut inputs = EnrichmentInputs::default();
 
+    // Session summary (Claude Code's own title-summary), if present.
+    let mut summary_result = graph
+        .execute(
+            query("MATCH (s:Session {session_id: $session_id}) RETURN s.summary AS summary")
+                .param("session_id", session_id),
+        )
+        .await?;
+    if let Some(row) = summary_result.next().await? {
+        let summary: String = row.get("summary").unwrap_or_default();
+        if !summary.trim().is_empty() {
+            inputs.summary = Some(summary);
+        }
+    }
+
+    // Turns with embeddings, chronological. Embeddings power salience ranking.
     let mut turn_result = graph
         .execute(
             query(
                 "MATCH (t:Turn {session_id: $session_id})
              WHERE t.text IS NOT NULL AND t.text <> ''
-             RETURN t.role AS role, t.text AS text, t.timestamp AS ts
+             RETURN t.role AS role, t.text AS text,
+                    coalesce(t.tool_use_count, 0) AS tool_use_count,
+                    t.embedding AS embedding
              ORDER BY t.timestamp ASC",
             )
             .param("session_id", session_id),
         )
         .await?;
-
     while let Some(row) = turn_result.next().await? {
-        if buf.len() >= max_chars {
-            break;
-        }
         let role: String = row.get("role").unwrap_or_default();
         let text: String = row.get("text").unwrap_or_default();
-        if !buf.is_empty() {
-            buf.push_str("\n---\n");
-        }
-        buf.push_str(&format!("[{role}]\n{text}"));
+        let tool_use_count: i64 = row.get("tool_use_count").unwrap_or(0);
+        let emb: Vec<f64> = row.get("embedding").unwrap_or_default();
+        let embedding = if emb.is_empty() {
+            None
+        } else {
+            Some(emb.iter().map(|&x| x as f32).collect())
+        };
+        inputs.turns.push(EnrichmentTurn {
+            role,
+            text,
+            tool_use_count,
+            embedding,
+        });
     }
 
-    if include_reflections && buf.len() < max_chars {
-        let mut refl_result = graph
-            .execute(
-                query(
-                    "MATCH (r:Reflection {session_id: $session_id})
-                 WHERE r.text IS NOT NULL AND r.text <> ''
-                 RETURN r.text AS text
-                 ORDER BY r.timestamp ASC",
-                )
-                .param("session_id", session_id),
+    // Reflections (thinking blocks), chronological.
+    let mut refl_result = graph
+        .execute(
+            query(
+                "MATCH (:Turn {session_id: $session_id})-[:HAS_REFLECTION]->(r:Reflection)
+             WHERE r.text IS NOT NULL AND r.text <> ''
+             RETURN r.text AS text
+             ORDER BY r.timestamp ASC",
             )
-            .await?;
-
-        while let Some(row) = refl_result.next().await? {
-            if buf.len() >= max_chars {
-                break;
-            }
-            let text: String = row.get("text").unwrap_or_default();
-            if !buf.is_empty() {
-                buf.push_str("\n---\n");
-            }
-            buf.push_str(&format!("[thinking]\n{text}"));
+            .param("session_id", session_id),
+        )
+        .await?;
+    while let Some(row) = refl_result.next().await? {
+        let text: String = row.get("text").unwrap_or_default();
+        if !text.is_empty() {
+            inputs.reflections.push(text);
         }
     }
 
-    if buf.len() > max_chars {
-        let mut end = max_chars;
-        while !buf.is_char_boundary(end) && end > 0 {
-            end -= 1;
+    // Distinct files touched, most-touched first — dense library/framework signal.
+    let mut file_result = graph
+        .execute(
+            query(
+                "MATCH (:Turn {session_id: $session_id})-[:CALLED]->(:ToolCall)-[:TOUCHED]->(f:File)
+             RETURN f.path AS path, count(*) AS c
+             ORDER BY c DESC, path ASC
+             LIMIT 100",
+            )
+            .param("session_id", session_id),
+        )
+        .await?;
+    while let Some(row) = file_result.next().await? {
+        let path: String = row.get("path").unwrap_or_default();
+        if !path.is_empty() {
+            inputs.files.push(path);
         }
-        buf.truncate(end);
     }
 
-    Ok(buf)
+    // Distinct commands run, most-run first.
+    let mut cmd_result = graph
+        .execute(
+            query(
+                "MATCH (:Turn {session_id: $session_id})-[:CALLED]->(:ToolCall)-[:RAN]->(c:Command)
+             RETURN c.cmd AS cmd, count(*) AS n
+             ORDER BY n DESC, cmd ASC
+             LIMIT 50",
+            )
+            .param("session_id", session_id),
+        )
+        .await?;
+    while let Some(row) = cmd_result.next().await? {
+        let cmd: String = row.get("cmd").unwrap_or_default();
+        if !cmd.is_empty() {
+            inputs.commands.push(cmd);
+        }
+    }
+
+    Ok(inputs)
 }
 
 #[cfg(feature = "sessions")]

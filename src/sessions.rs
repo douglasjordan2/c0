@@ -6,8 +6,8 @@ use crate::claude::{ExtractedConcept, LlmClient};
 use crate::config;
 use crate::embeddings;
 use crate::graph::{
-    self, BashCall, FileTouch, Reflection, Session, SessionAggregates, ToolCallRecord,
-    ToolResultBackfill, Turn,
+    self, BashCall, EnrichmentInputs, EnrichmentTurn, FileTouch, Reflection, Session,
+    SessionAggregates, ToolCallRecord, ToolResultBackfill, Turn,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1434,12 +1434,22 @@ pub async fn list_session_costs(namespaces: &[String], limit: usize) -> Result<(
 const ENRICHMENT_TEXT_BUDGET: usize = 8_000;
 const DEFAULT_MAX_CONCEPTS_PER_SESSION: usize = 8;
 const ENRICHMENT_OLLAMA_TIMEOUT_SECS: u64 = 600;
+/// Fraction of the text budget reserved for the tool/file signal block.
+const ENRICHMENT_SIGNAL_DIV: usize = 4;
 
 fn enrichment_text_budget() -> usize {
     std::env::var("C0_ENRICH_TEXT_BUDGET")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(ENRICHMENT_TEXT_BUDGET)
+}
+
+/// When set (`C0_ENRICH_FULL=1`), extract over the whole session via map-reduce
+/// instead of a single salience-selected window.
+fn enrichment_full() -> bool {
+    std::env::var("C0_ENRICH_FULL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn enrichment_max_concepts() -> usize {
@@ -1603,6 +1613,267 @@ async fn extract_session_concepts(
     client.extract_session_concepts(text, max_concepts).await
 }
 
+/// Collapse a string to a single capped line for the signal block.
+fn truncate_for_signal(s: &str, max: usize) -> String {
+    let one_line = s.replace('\n', " ");
+    if one_line.len() <= max {
+        return one_line;
+    }
+    let mut end = max;
+    while !one_line.is_char_boundary(end) && end > 0 {
+        end -= 1;
+    }
+    format!("{}…", &one_line[..end])
+}
+
+/// Build the tool/file signal block: touched files and run commands carry dense
+/// library/framework/tool names that prose often omits.
+fn build_signal_block(files: &[String], commands: &[String], cap: usize) -> String {
+    if cap == 0 || (files.is_empty() && commands.is_empty()) {
+        return String::new();
+    }
+    let mut block = String::new();
+    if !files.is_empty() {
+        block.push_str("[files touched]\n");
+        for path in files {
+            let line = format!("- {path}\n");
+            if block.len() + line.len() > cap {
+                break;
+            }
+            block.push_str(&line);
+        }
+    }
+    if !commands.is_empty() && block.len() < cap {
+        block.push_str("[commands run]\n");
+        for cmd in commands {
+            let line = format!("- {}\n", truncate_for_signal(cmd, 120));
+            if block.len() + line.len() > cap {
+                break;
+            }
+            block.push_str(&line);
+        }
+    }
+    block
+}
+
+/// Pick the most concept-bearing turns to fill `budget`, returning their indices
+/// in chronological order. Ranks by similarity to the session centroid (most
+/// representative turns), boosting turns that ran tools and the opening turn
+/// (which usually states the task). Falls back to chronological fill when no
+/// turn embeddings exist.
+fn select_salient_turn_indices(turns: &[EnrichmentTurn], budget: usize) -> Vec<usize> {
+    // Separator + role-label overhead per turn ("\n---\n[role]\n").
+    const PER_TURN_OVERHEAD: usize = 12;
+
+    let dim = turns
+        .iter()
+        .find_map(|t| t.embedding.as_ref().map(Vec::len))
+        .unwrap_or(0);
+
+    // No embeddings: replicate the original chronological-fill behaviour.
+    if dim == 0 {
+        let mut used = 0usize;
+        let mut chosen = Vec::new();
+        for (i, t) in turns.iter().enumerate() {
+            let cost = t.text.len() + PER_TURN_OVERHEAD;
+            if used + cost > budget && !chosen.is_empty() {
+                break;
+            }
+            chosen.push(i);
+            used += cost;
+        }
+        return chosen;
+    }
+
+    // Centroid over embedded turns.
+    let mut centroid = vec![0f32; dim];
+    let mut n = 0f32;
+    for t in turns {
+        if let Some(emb) = &t.embedding
+            && emb.len() == dim
+        {
+            for (c, v) in centroid.iter_mut().zip(emb) {
+                *c += v;
+            }
+            n += 1.0;
+        }
+    }
+    if n > 0.0 {
+        for c in &mut centroid {
+            *c /= n;
+        }
+    }
+
+    let mut scored: Vec<(usize, f32)> = turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut score = match &t.embedding {
+                Some(emb) if emb.len() == dim => embeddings::cosine_similarity(emb, &centroid),
+                // Short turns are unembedded; keep them eligible but low-priority.
+                _ => 0.3,
+            };
+            if t.tool_use_count > 0 {
+                score += 0.15;
+            }
+            if i == 0 && t.role.eq_ignore_ascii_case("user") {
+                score += 0.25;
+            }
+            (i, score)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut used = 0usize;
+    let mut chosen = Vec::new();
+    for (i, _) in scored {
+        let cost = turns[i].text.len() + PER_TURN_OVERHEAD;
+        // Always keep at least one turn; otherwise pack within budget.
+        if used + cost > budget && !chosen.is_empty() {
+            continue;
+        }
+        chosen.push(i);
+        used += cost;
+    }
+    chosen.sort_unstable();
+    chosen
+}
+
+/// Assemble the single-window enrichment text: summary seed + tool/file signal +
+/// salience-selected turns, with reflections appended if room remains.
+fn build_enrichment_text(inputs: &EnrichmentInputs, budget: usize) -> String {
+    let signal = build_signal_block(
+        &inputs.files,
+        &inputs.commands,
+        budget / ENRICHMENT_SIGNAL_DIV,
+    );
+
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(summary) = &inputs.summary {
+        sections.push(format!("[summary]\n{}", truncate_for_signal(summary, 400)));
+    }
+    if !signal.is_empty() {
+        sections.push(signal.trim_end().to_string());
+    }
+
+    let reserved: usize = sections.iter().map(|s| s.len() + 5).sum();
+    let turn_budget = budget.saturating_sub(reserved);
+
+    for i in select_salient_turn_indices(&inputs.turns, turn_budget) {
+        let t = &inputs.turns[i];
+        sections.push(format!("[{}]\n{}", t.role, t.text));
+    }
+
+    let mut text = sections.join("\n---\n");
+
+    if text.len() < budget {
+        for refl in &inputs.reflections {
+            if text.len() >= budget {
+                break;
+            }
+            text.push_str("\n---\n[thinking]\n");
+            text.push_str(refl);
+        }
+    }
+
+    if text.len() > budget {
+        let mut end = budget;
+        while !text.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+/// Full-coverage map-reduce: chunk every turn chronologically into budget-sized
+/// windows, extract concepts from each, and merge deduped by name.
+async fn extract_concepts_full(
+    inputs: &EnrichmentInputs,
+    budget: usize,
+    max_concepts: usize,
+) -> Result<Vec<ExtractedConcept>> {
+    let signal = build_signal_block(
+        &inputs.files,
+        &inputs.commands,
+        budget / ENRICHMENT_SIGNAL_DIV,
+    );
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for t in &inputs.turns {
+        let piece = format!("[{}]\n{}", t.role, t.text);
+        if !cur.is_empty() && cur.len() + piece.len() + 5 > budget {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push_str("\n---\n");
+        }
+        cur.push_str(&piece);
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+
+    // Prepend the tool/file signal to the first chunk for shared context.
+    if !signal.is_empty() {
+        match chunks.first_mut() {
+            Some(first) => *first = format!("{signal}\n---\n{first}"),
+            None => chunks.push(signal),
+        }
+    }
+
+    let total = chunks.len();
+    let mut merged: Vec<ExtractedConcept> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        if chunk.trim().is_empty() {
+            continue;
+        }
+        match extract_session_concepts(chunk, max_concepts).await {
+            Ok(concepts) => {
+                for c in concepts {
+                    if seen.insert(c.name.clone()) {
+                        merged.push(c);
+                    }
+                }
+            }
+            Err(e) => eprintln!("  chunk {}/{total} extraction failed: {e}", i + 1),
+        }
+    }
+    Ok(merged)
+}
+
+/// Fetch a session's enrichment inputs and extract concepts, choosing the
+/// salience-window or full map-reduce strategy. Returns the concepts plus the
+/// character count fed to the model (0 means there was nothing to enrich).
+async fn extract_concepts_for_session(
+    graph_conn: &neo4rs::Graph,
+    session_id: &str,
+    budget: usize,
+    max_concepts: usize,
+) -> Result<(Vec<ExtractedConcept>, usize)> {
+    let inputs = graph::get_session_enrichment_inputs(graph_conn, session_id).await?;
+    if inputs.turns.is_empty() && inputs.reflections.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
+    if enrichment_full() {
+        let total: usize = inputs.turns.iter().map(|t| t.text.len()).sum();
+        let concepts = extract_concepts_full(&inputs, budget, max_concepts).await?;
+        Ok((concepts, total))
+    } else {
+        let text = build_enrichment_text(&inputs, budget);
+        if text.trim().is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let len = text.len();
+        let concepts = extract_session_concepts(&text, max_concepts).await?;
+        Ok((concepts, len))
+    }
+}
+
 pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
@@ -1633,33 +1904,30 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         }
     }
 
-    let text = graph::get_session_text_for_enrichment(
+    let (concepts, text_len) = match extract_concepts_for_session(
         &graph_conn,
         session_id,
-        true,
         enrichment_text_budget(),
+        enrichment_max_concepts(),
     )
-    .await?;
-
-    if text.trim().is_empty() {
-        println!("Session {session_id} has no text to enrich.");
-        stats.sessions_skipped += 1;
-        return Ok(stats);
-    }
-
-    println!(
-        "Enriching session {session_id} ({} chars of text)",
-        text.len()
-    );
-
-    let concepts = match extract_session_concepts(&text, enrichment_max_concepts()).await {
-        Ok(c) => c,
+    .await
+    {
+        Ok(v) => v,
         Err(e) => {
             stats.errors += 1;
             eprintln!("  LLM extraction failed: {e}");
             return Ok(stats);
         }
     };
+
+    if text_len == 0 {
+        println!("Session {session_id} has no text to enrich.");
+        stats.sessions_skipped += 1;
+        return Ok(stats);
+    }
+
+    let mode = if enrichment_full() { " [full]" } else { "" };
+    println!("Enriching session {session_id} ({text_len} chars of text{mode})");
 
     println!("  extracted {} concept(s)", concepts.len());
 
@@ -1774,35 +2042,27 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
     let mut total = EnrichStats::default();
 
     for (sid, ns) in &session_ids {
-        let text = graph::get_session_text_for_enrichment(
+        let short = &sid[..8.min(sid.len())];
+        let (concepts, text_len) = match extract_concepts_for_session(
             &graph_conn,
             sid,
-            true,
             enrichment_text_budget(),
+            enrichment_max_concepts(),
         )
-        .await?;
-
-        if text.trim().is_empty() {
-            total.sessions_skipped += 1;
-            continue;
-        }
-
-        print!(
-            "  [{ns}] {} ({} chars) ... ",
-            &sid[..8.min(sid.len())],
-            text.len()
-        );
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-
-        let concepts = match extract_session_concepts(&text, enrichment_max_concepts()).await {
-            Ok(c) => c,
+        .await
+        {
+            Ok(v) => v,
             Err(e) => {
-                println!("✗ extract: {e}");
+                println!("  [{ns}] {short} ✗ extract: {e}");
                 total.errors += 1;
                 continue;
             }
         };
+
+        if text_len == 0 {
+            total.sessions_skipped += 1;
+            continue;
+        }
 
         let mut linked = 0u32;
         for concept in &concepts {
@@ -1841,7 +2101,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
         graph::mark_session_enriched(&graph_conn, sid, i64::from(linked)).await?;
         total.sessions_enriched += 1;
-        println!("✓ {linked} concept(s)");
+        println!("  [{ns}] {short} ({text_len} chars) ✓ {linked} concept(s)");
     }
 
     println!();
@@ -1850,4 +2110,92 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
         total.sessions_enriched, total.concepts_linked, total.errors, total.sessions_skipped
     );
     Ok(total)
+}
+
+#[cfg(test)]
+mod enrichment_tests {
+    use super::*;
+
+    fn turn(role: &str, text: &str, tools: i64, emb: Option<Vec<f32>>) -> EnrichmentTurn {
+        EnrichmentTurn {
+            role: role.to_string(),
+            text: text.to_string(),
+            tool_use_count: tools,
+            embedding: emb,
+        }
+    }
+
+    #[test]
+    fn truncate_for_signal_collapses_and_caps() {
+        assert_eq!(truncate_for_signal("a\nb c", 10), "a b c");
+        let t = truncate_for_signal("abcdefghij", 5);
+        assert!(t.starts_with("abcde") && t.ends_with('…'));
+    }
+
+    #[test]
+    fn signal_block_lists_files_and_commands_within_cap() {
+        let files = vec!["src/main.rs".to_string(), "Cargo.toml".to_string()];
+        let cmds = vec!["cargo build".to_string()];
+        let block = build_signal_block(&files, &cmds, 200);
+        assert!(block.contains("[files touched]"));
+        assert!(block.contains("src/main.rs"));
+        assert!(block.contains("[commands run]"));
+        assert!(block.contains("cargo build"));
+
+        // A zero cap yields nothing.
+        assert_eq!(build_signal_block(&files, &cmds, 0), "");
+    }
+
+    #[test]
+    fn salience_without_embeddings_is_chronological_fill() {
+        let turns = vec![
+            turn("user", "first", 0, None),
+            turn("assistant", "second", 0, None),
+            turn("user", "third", 0, None),
+        ];
+        // Generous budget keeps every turn, in order.
+        assert_eq!(select_salient_turn_indices(&turns, 10_000), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn salience_keeps_at_least_one_turn_when_over_budget() {
+        let turns = vec![turn("user", &"x".repeat(500), 0, None)];
+        let picked = select_salient_turn_indices(&turns, 10);
+        assert_eq!(picked, vec![0]);
+    }
+
+    #[test]
+    fn salience_ranks_representative_turns_first() {
+        // Centroid sits near [1,0]; the off-axis turn should be dropped first
+        // when the budget only fits two of the three turns.
+        let turns = vec![
+            turn("user", &"a".repeat(100), 0, Some(vec![1.0, 0.0])),
+            turn("assistant", &"b".repeat(100), 0, Some(vec![0.9, 0.1])),
+            turn("assistant", &"c".repeat(100), 0, Some(vec![0.0, 1.0])),
+        ];
+        let picked = select_salient_turn_indices(&turns, 230);
+        assert!(picked.contains(&0));
+        assert!(!picked.contains(&2));
+        // Output stays chronological.
+        let mut sorted = picked.clone();
+        sorted.sort_unstable();
+        assert_eq!(picked, sorted);
+    }
+
+    #[test]
+    fn enrichment_text_includes_summary_and_signal() {
+        let inputs = EnrichmentInputs {
+            summary: Some("Refactor enrichment selection".to_string()),
+            turns: vec![turn("user", "let's optimize the enrichment", 0, None)],
+            reflections: vec![],
+            files: vec!["src/sessions.rs".to_string()],
+            commands: vec!["cargo test".to_string()],
+        };
+        let text = build_enrichment_text(&inputs, 8_000);
+        assert!(text.contains("[summary]"));
+        assert!(text.contains("Refactor enrichment selection"));
+        assert!(text.contains("src/sessions.rs"));
+        assert!(text.contains("let's optimize"));
+        assert!(text.len() <= 8_000);
+    }
 }
