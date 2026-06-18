@@ -112,6 +112,18 @@ c0 walk "reciprocal rank fusion"                             # traverses outgoin
 
 Run `c0 --help` for the full set.
 
+## More
+
+Beyond the core commands, c0 includes a few subsystems worth knowing about (fuller docs are on the way):
+
+- **Live sources** — `c0 link source add <name> --url <url>` fetches and embeds a page; `c0 fetch <query>` and `c0 link source search` retrieve over them, so external references stay fresh in the graph.
+- **Triggers** — `c0 trigger add <regex>` (or `--semantic`) decide when a prompt should consult c0; pair one with a [hook](#using-c0-with-claude-code) for hands-off recall.
+- **Sessions** — index your assistant transcripts (build with `--features sessions`), then `c0 sessions search`, `c0 sessions resume`, and track spend with `c0 sessions cost`.
+- **Raw queries & history** — `c0 find "<cypher>"` runs Cypher directly against the graph; `c0 invalidation-chain <name>` reads a concept's causal history.
+- **Maintenance** — `c0 backfill embeddings`, `c0 audit`, `c0 move`, `c0 export`, `c0 status`, `c0 config show`.
+
+Run `c0 <command> --help` for flags.
+
 ## Configuration
 
 c0 reads connection details from the environment, with a per-namespace `.c0/config.toml` for local settings:
