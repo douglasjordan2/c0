@@ -36,6 +36,24 @@ query ──▶ ❶ exact match ─▶ ❷ keyword (BM25) ─▶ ❸ hybrid (BM2
 - **Bi-temporal.** Every concept carries two independent timestamps — when it was *recorded* (transaction time) and when it is *true* (valid time) — so you can run point-in-time ("as-of") queries, **supersede** a concept when it evolves, or **invalidate** it with a causal audit trail. Nothing is deleted; it's time-bounded.
 - **Self-improving reflection loop.** When a lookup finds nothing, the dead end is queued, and an LLM classifies it: **commit** a genuinely new, reusable concept, **discard** noise, or **queue** the uncertain ones for human review. Run it continuously (`c0 reflector run`) and c0 fills its own memory gaps as you work — [details below](#the-reflection-loop--c0s-learning-engine).
 
+## See it in action
+
+**Correct stale training data.** A pre-2026 model insists you create a Shopify app in Admin → "Develop apps". c0 walks its graph and overrides that with a patch — current knowledge wins.
+
+![c0 corrects stale training data with a patch](assets/demo.gif)
+
+**Hybrid retrieval — keyword + vector, fused by RRF.** One paraphrased question, three ways: keyword (BM25) misses it, vector understands intent, hybrid fuses both.
+
+![keyword vs vector vs hybrid retrieval](assets/demo-hybrid.gif)
+
+**Bi-temporal — ask "as of" any point in time.** The same question returns the era-correct answer: the Pages Router in 2022, the App Router today, with a dated supersession trail.
+
+![same query, different era, different answer](assets/demo-temporal.gif)
+
+**Self-improving — a dead end becomes a new concept.** A lookup misses, the reflection loop classifies it, and c0 commits the new knowledge to its own graph — no human in the loop.
+
+![a dead end is classified and committed](assets/demo-reflect.gif)
+
 ## Requirements
 
 - **Rust** (2024 edition — 1.85+)
@@ -138,6 +156,62 @@ training knowledge. As you learn durable facts, write them back with
 ```
 
 Keep your preferences and conventions in `CLAUDE.md` as usual — just stop hand-maintaining *knowledge* there. For hands-off recall, wire `c0 walk` into a [Claude Code hook](https://docs.claude.com/en/docs/claude-code/hooks) so the lookup happens automatically on matching prompts.
+
+### The setup I run
+
+The conceptual version above is enough to get value. Here's the concrete wiring I use day to day.
+
+**1. Send memory to the graph, not to files.** Claude Code ships a built-in file memory (`memory/`, `MEMORY.md`). Run it alongside c0 and you get two unsynced stores. One rule in `CLAUDE.md` routes everything to the graph instead, where `c0 walk` can find it:
+
+```md
+## Memory → c0, not files
+
+Don't use the built-in file memory (`memory/`, `MEMORY.md`). The graph is the only
+persistent store. When you'd save a durable fact, route it to c0 —
+`c0 add concept <name> -d "..."` or `c0 add patch <name> --content "..."`.
+To recall, `c0 walk "<topic>"`. This rule overrides the default memory behavior.
+```
+
+**2. Three hooks make recall and reflection automatic**, so I never have to *remember* to use c0. Register them in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/c0-session-start.sh" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/c0-memory-check.sh" }] }],
+    "PostToolUse":      [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/dead-end-reflect.sh" }] }]
+  }
+}
+```
+
+*`c0-memory-check.sh`* — on every prompt, ask c0 whether the topic is one it knows; if so, tell Claude to walk it **before** answering:
+
+```bash
+#!/usr/bin/env bash
+input=$(cat); prompt=$(echo "$input" | jq -r '.prompt // empty')
+[[ ${#prompt} -lt 15 ]] && exit 0
+topic=$(c0 trigger match "$prompt" 2>/dev/null)
+if [[ -n "$topic" ]]; then
+  echo "🧠 Before responding, run: c0 walk \"$topic\""
+  echo "   (loads memory; patches correct stale training data)"
+fi
+# falls back to `c0 extract-concepts` to catch known concepts no trigger covered
+```
+
+*`dead-end-reflect.sh`* — when any command prints a `DEAD_END`, classify the miss right then instead of waiting for the hourly loop:
+
+```bash
+#!/usr/bin/env bash
+out=$(cat | jq -r '.tool_response.stdout // ""')
+[[ "$out" == *"DEAD_END:"* ]] || exit 0
+q=$(echo "$out" | sed -n 's/.*DEAD_END:[^:]*:\(.*\)/\1/p' | head -1)
+[[ -n "$q" ]] && jq -n --arg q "$q" '{hookSpecificOutput:{hookEventName:"PostToolUse",
+  additionalContext:("Dead end: \""+$q+"\". Classify now: commit a real concept with `c0 add concept`, queue if unsure, discard if noise.")}}'
+```
+
+*`c0-session-start.sh`* — opens a c0 session and surfaces any dead ends the previous session left unresolved, so misses don't fall through the cracks between sittings.
+
+**3. Close the loop unattended.** The hooks *notice* gaps; the reflection loop *fills* them. Run it on a schedule — see [The reflection loop](#the-reflection-loop--c0s-learning-engine) for `c0 reflector run` and a cron/systemd setup.
 
 > This is a workflow suggestion, not a setup requirement — c0 is a plain CLI and works with any assistant (or none). Adopt as much of the pattern as suits you.
 
