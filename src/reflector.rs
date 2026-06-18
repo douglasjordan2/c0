@@ -527,12 +527,29 @@ async fn classify_query_llm(
 
     let session_id = get_reflector_session_id();
 
+    let system_context = "You are the c0 knowledge curator. You help classify dead-end queries from a knowledge graph system, deciding which should become new concepts (COMMIT), which are noise (DISCARD), and which need human review (QUEUE). Build context over time about the domain and project patterns.";
+    let full_prompt = format!("{system_context}\n\n{prompt}");
+
     let response = if let Some(ref sid) = session_id {
-        llm.generate_resume(&prompt, sid, Some(CLASSIFY_SCHEMA))
-            .await?
+        match llm
+            .generate_resume(&prompt, sid, Some(CLASSIFY_SCHEMA))
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("No conversation found") || msg.contains("session ID") {
+                    // The persisted Claude conversation is gone (e.g. it aged out
+                    // of claude's history). Drop the stale id and retry once from a
+                    // fresh session rather than hard-failing every classification.
+                    let _ = fs::remove_file(get_or_create_session_file());
+                    llm.generate(&full_prompt, Some(CLASSIFY_SCHEMA)).await?
+                } else {
+                    return Err(e);
+                }
+            }
+        }
     } else {
-        let system_context = "You are the c0 knowledge curator. You help classify dead-end queries from a knowledge graph system, deciding which should become new concepts (COMMIT), which are noise (DISCARD), and which need human review (QUEUE). Build context over time about the domain and project patterns.";
-        let full_prompt = format!("{system_context}\n\n{prompt}");
         llm.generate(&full_prompt, Some(CLASSIFY_SCHEMA)).await?
     };
 
