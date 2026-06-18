@@ -528,6 +528,69 @@ pub async fn add_patch(
     // patch empty when walked from a different directory or host.
     let abs_file = file.map(absolutize_patch_path);
 
+    // Resolve the --corrects target up front so we never create an orphaned
+    // patch. Normally the target is a Concept (the patch corrects that concept).
+    // As a fallback we accept another KnowledgePatch name (e.g. correcting a
+    // memory/topology patch): the new patch inherits that patch's anchor
+    // concepts so the correction surfaces wherever the corrected patch does.
+    // If the target resolves to neither, we error instead of silently leaving
+    // the patch unanchored.
+    let corrects_anchors: Vec<String> = if let Some(target) = corrects {
+        let ns_list = vec!["global".to_string(), namespace.to_string()];
+        let mut anchors: Vec<String> = Vec::new();
+
+        let mut concept_match = graph
+            .execute(
+                query(
+                    "MATCH (c:Concept {name: $target})
+                 WHERE c.namespace IN $namespaces
+                 RETURN DISTINCT c.name AS name",
+                )
+                .param("target", target)
+                .param("namespaces", ns_list.clone()),
+            )
+            .await?;
+        while let Some(row) = concept_match.next().await? {
+            let n: String = row.get("name").unwrap_or_default();
+            if !n.is_empty() {
+                anchors.push(n);
+            }
+        }
+
+        if anchors.is_empty() {
+            // Fallback: the target may be another KnowledgePatch.
+            let mut patch_anchors = graph
+                .execute(
+                    query(
+                        "MATCH (c:Concept)-[:HAS_PATCH]->(:KnowledgePatch {name: $target})
+                     WHERE c.namespace IN $namespaces
+                     RETURN DISTINCT c.name AS name",
+                    )
+                    .param("target", target)
+                    .param("namespaces", ns_list.clone()),
+                )
+                .await?;
+            while let Some(row) = patch_anchors.next().await? {
+                let n: String = row.get("name").unwrap_or_default();
+                if !n.is_empty() {
+                    anchors.push(n);
+                }
+            }
+        }
+
+        if anchors.is_empty() {
+            anyhow::bail!(
+                "--corrects target '{target}' matched no Concept and no anchored \
+                 KnowledgePatch in namespaces {ns_list:?}; refusing to create an \
+                 unanchored patch. Pass an existing concept name, or a patch name \
+                 to inherit its anchors."
+            );
+        }
+        anchors
+    } else {
+        Vec::new()
+    };
+
     let mut params = vec![
         ("name", name.to_string()),
         ("namespace", namespace.to_string()),
@@ -586,17 +649,18 @@ pub async fn add_patch(
     }
     graph.run(q).await?;
 
-    if let Some(concept) = corrects {
+    if !corrects_anchors.is_empty() {
         graph
             .run(
                 query(
-                    "MATCH (c:Concept {name: $concept}), (p:KnowledgePatch {name: $patch})
-                 WHERE c.namespace IN $namespaces
+                    "MATCH (p:KnowledgePatch {name: $patch})
+                 MATCH (c:Concept)
+                 WHERE c.name IN $anchors AND c.namespace IN $namespaces
                  MERGE (c)-[:HAS_PATCH]->(p)
                  MERGE (p)-[:CORRECTS]->(c)",
                 )
-                .param("concept", concept)
                 .param("patch", name)
+                .param("anchors", corrects_anchors.clone())
                 .param(
                     "namespaces",
                     vec!["global".to_string(), namespace.to_string()],
