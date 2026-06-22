@@ -494,31 +494,6 @@ async fn classify_query_ollama(
     Ok(classification)
 }
 
-const REFLECTOR_SESSION_FILE: &str = ".c0/reflector-session.txt";
-
-fn get_or_create_session_file() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(REFLECTOR_SESSION_FILE)
-}
-
-fn get_reflector_session_id() -> Option<String> {
-    let session_file = get_or_create_session_file();
-    if session_file.exists() {
-        fs::read_to_string(&session_file)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    } else {
-        None
-    }
-}
-
-fn save_reflector_session_id(session_id: &str) {
-    let session_file = get_or_create_session_file();
-    let _ = fs::write(&session_file, session_id);
-}
-
 const CLASSIFY_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["COMMIT","DISCARD","QUEUE"]},"reason":{"type":"string"}},"required":["decision","reason"],"additionalProperties":false}"#;
 
 async fn classify_query_llm(
@@ -532,37 +507,34 @@ async fn classify_query_llm(
         .replace("{namespace}", namespace)
         .replace("{context}", context.unwrap_or("(none provided)"));
 
-    let session_id = get_reflector_session_id();
-
-    let system_context = "You are the c0 knowledge curator. You help classify dead-end queries from a knowledge graph system, deciding which should become new concepts (COMMIT), which are noise (DISCARD), and which need human review (QUEUE). Build context over time about the domain and project patterns.";
+    let system_context = "You are the c0 knowledge curator. You help classify dead-end queries from a knowledge graph system, deciding which should become new concepts (COMMIT), which are noise (DISCARD), and which need human review (QUEUE).";
     let full_prompt = format!("{system_context}\n\n{prompt}");
 
-    let response = if let Some(ref sid) = session_id {
-        match llm
-            .generate_resume(&prompt, sid, Some(CLASSIFY_SCHEMA))
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("No conversation found") || msg.contains("session ID") {
-                    // The persisted Claude conversation is gone (e.g. it aged out
-                    // of claude's history). Drop the stale id and retry once from a
-                    // fresh session rather than hard-failing every classification.
-                    let _ = fs::remove_file(get_or_create_session_file());
-                    llm.generate(&full_prompt, Some(CLASSIFY_SCHEMA)).await?
-                } else {
-                    return Err(e);
-                }
-            }
+    // Classification is stateless: each dead end is independent, so we do NOT
+    // resume a persisted Claude session. The old `--resume` path replayed an
+    // ever-growing conversation on every call, so per-classification latency
+    // climbed with each processed dead end until it crossed the 120s CLI
+    // timeout — silently dropping real concepts into the review queue as false
+    // QUEUEs. A fresh `generate` keeps every call O(1) and removes the
+    // stale-session failure mode entirely.
+    //
+    // Any single failure (timeout, dropped connection, a transient CLI error)
+    // gets exactly one fresh retry before we give up, so one hiccup no longer
+    // demotes a classifiable concept to the review queue.
+    let response = match llm.generate(&full_prompt, Some(CLASSIFY_SCHEMA)).await {
+        Ok(resp) => resp,
+        Err(first_err) => {
+            eprintln!("reflector: classification attempt failed ({first_err}); retrying once");
+            llm.generate(&full_prompt, Some(CLASSIFY_SCHEMA))
+                .await
+                .map_err(|retry_err| {
+                    anyhow::anyhow!(
+                        "classification failed after retry: {retry_err} \
+                         (first attempt: {first_err})"
+                    )
+                })?
         }
-    } else {
-        llm.generate(&full_prompt, Some(CLASSIFY_SCHEMA)).await?
     };
-
-    if let Some(ref new_sid) = response.session_id {
-        save_reflector_session_id(new_sid);
-    }
 
     let result_str = response.result.trim();
     let result_str = if result_str.starts_with("```") {
