@@ -3,19 +3,22 @@
 //!
 //! It seeds a small *synthetic* knowledge world (invented entities no model has
 //! seen in training) into a dedicated `c0-bench` namespace, then asks the same
-//! questions three ways:
+//! questions four ways:
 //!
-//!   * **bare**     — the model alone (no memory). Can only hallucinate or refuse.
-//!   * **flat_rag** — naive vector RAG over the same facts as prose blobs. The
-//!                    "why not just a vector store?" baseline. Has no notion of
-//!                    supersession or effective dates.
-//!   * **c0**       — the real c0 retrieval cascade (exact → fulltext → hybrid),
-//!                    temporal-aware, patch-aware.
+//!   * **bare**        — the model alone (no memory). Can only hallucinate or refuse.
+//!   * **flat_rag**    — naive vector RAG over the same facts as prose blobs. The
+//!                       "why not just a vector store?" baseline. Has no notion of
+//!                       supersession or effective dates.
+//!   * **flat_rerank** — flat_rag with a wider candidate pool re-ranked by the LLM.
+//!                       The "but a real stack uses a reranker" arm; reranking
+//!                       reorders passages but can't invent missing metadata.
+//!   * **c0**          — the real c0 retrieval cascade (exact → fulltext → hybrid),
+//!                       temporal-aware, patch-aware.
 //!
 //! Each answer is graded 0/1 by an LLM judge. Results are broken down by
-//! category so the interesting signal is visible: all three arms look similar on
-//! simple recall and diverge sharply on correction and temporal questions, which
-//! only c0 can represent.
+//! category so the interesting signal is visible: the arms look similar on simple
+//! recall and diverge sharply on correction and temporal questions, which only c0
+//! can represent.
 //!
 //! Because every fact is synthetic, the score is not "model trivia knowledge" —
 //! it isolates what the *memory layer* contributes.
