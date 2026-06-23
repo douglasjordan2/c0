@@ -110,7 +110,7 @@ enum Commands {
         /// Only seed the graph; do not run the eval.
         #[arg(long)]
         seed_only: bool,
-        /// Comma-separated arms to run: bare,flat_rag,c0
+        /// Comma-separated arms to run: bare,flat_rag,flat_rerank,c0
         #[arg(long, default_value = "bare,flat_rag,c0")]
         arms: String,
         /// Trials per question; the majority verdict is used (reduces LLM noise).
@@ -1370,7 +1370,7 @@ async fn main() -> Result<()> {
             let arms: Vec<String> = arms
                 .split(',')
                 .map(|s| s.trim().to_string())
-                .filter(|s| ["bare", "flat_rag", "c0"].contains(&s.as_str()))
+                .filter(|s| ["bare", "flat_rag", "flat_rerank", "c0"].contains(&s.as_str()))
                 .collect();
             if seed_only {
                 let sem = config::SemanticConfig::load();

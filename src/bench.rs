@@ -399,7 +399,13 @@ impl FlatIndex {
         Ok(Self { chunks })
     }
 
-    async fn retrieve(&self, client: &OllamaClient, question: &str, k: usize) -> Result<String> {
+    /// Top-n chunk texts by cosine similarity to the question.
+    async fn candidates(
+        &self,
+        client: &OllamaClient,
+        question: &str,
+        n: usize,
+    ) -> Result<Vec<String>> {
         let q = embed_retry(client, question).await?;
         let mut scored: Vec<(f32, &String)> = self
             .chunks
@@ -407,13 +413,60 @@ impl FlatIndex {
             .map(|(v, t)| (embeddings::cosine_similarity(&q, v), t))
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scored
+        Ok(scored.iter().take(n).map(|(_, t)| (*t).clone()).collect())
+    }
+
+    async fn retrieve(&self, client: &OllamaClient, question: &str, k: usize) -> Result<String> {
+        Ok(self
+            .candidates(client, question, k)
+            .await?
             .iter()
-            .take(k)
-            .map(|(_, t)| format!("- {t}"))
+            .map(|t| format!("- {t}"))
             .collect::<Vec<_>>()
             .join("\n"))
     }
+}
+
+/// LLM reranker — the "but a real vector stack uses a reranker!" arm. Takes a
+/// wider candidate pool and asks the model to pick the k most relevant chunks.
+/// This reorders blobs by relevance, but it cannot invent an effective date or a
+/// supersession signal that isn't in the text — so it does not help on temporal
+/// or correction questions. That is exactly the point.
+async fn rerank(
+    llm: &LlmClient,
+    question: &str,
+    candidates: &[String],
+    k: usize,
+) -> Result<String> {
+    let listed = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}. {c}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "Rank the numbered passages by how useful they are for answering the question. \
+         Reply with ONLY the {k} most useful passage numbers, most useful first, \
+         comma-separated (e.g. \"3,1,5\").\n\nQuestion: {question}\n\nPassages:\n{listed}"
+    );
+    let out = generate_retry(llm, &prompt).await?;
+    let mut picked: Vec<String> = out
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|tok| tok.parse::<usize>().ok())
+        .filter(|&i| i >= 1 && i <= candidates.len())
+        .map(|i| candidates[i - 1].clone())
+        .collect();
+    picked.dedup();
+    if picked.is_empty() {
+        // fall back to the cosine order if the model didn't return usable indices
+        picked = candidates.iter().take(k).cloned().collect();
+    }
+    Ok(picked
+        .iter()
+        .take(k)
+        .map(|t| format!("- {t}"))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -599,12 +652,12 @@ pub async fn run(graph: &Graph, arms: &[String], do_seed: bool, trials: u32) -> 
         println!();
     }
 
-    // build flat index once if needed
-    let flat = if arms.iter().any(|a| a == "flat_rag") {
+    // build flat index once if either vector arm is requested
+    let flat = if arms.iter().any(|a| a == "flat_rag" || a == "flat_rerank") {
         match OllamaClient::from_config(&sem) {
             Some(c) => Some((FlatIndex::build(&c).await?, c)),
             None => {
-                eprintln!("⚠️  embeddings disabled; skipping flat_rag arm");
+                eprintln!("⚠️  embeddings disabled; skipping flat_rag/flat_rerank arms");
                 None
             }
         }
@@ -632,6 +685,13 @@ pub async fn run(graph: &Graph, arms: &[String], do_seed: bool, trials: u32) -> 
                     .map(Some),
                 "flat_rag" => match &flat {
                     Some((idx, client)) => idx.retrieve(client, q.question, 4).await.map(Some),
+                    None => continue,
+                },
+                "flat_rerank" => match &flat {
+                    Some((idx, client)) => match idx.candidates(client, q.question, 8).await {
+                        Ok(cands) => rerank(&llm, q.question, &cands, 4).await.map(Some),
+                        Err(e) => Err(e),
+                    },
                     None => continue,
                 },
                 _ => continue,

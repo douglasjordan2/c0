@@ -14,22 +14,30 @@ The headline question it answers with numbers, not assertions:
 Local run, LLM-judged, 10 questions across 4 categories, 3 trials per question
 (majority vote):
 
-| category       | bare model | flat vector RAG |     c0     |
-|----------------|:----------:|:---------------:|:----------:|
-| simple recall  | 0/3 (0%)   |   3/3 (100%)    | 3/3 (100%) |
-| **multi-hop**  | 0/2 (0%)   |  **0/2 (0%)**   | **2/2 (100%)** |
-| **correction** | 0/2 (0%)   |  **0/2 (0%)**   | **2/2 (100%)** |
-| **temporal**   | 0/3 (0%)   |  **0/3 (0%)**   | **3/3 (100%)** |
-| **overall**    | 0/10 (0%)  |  **3/10 (30%)** | **10/10 (100%)** |
+| category       | bare model | flat vector RAG | flat RAG + reranker |     c0     |
+|----------------|:----------:|:---------------:|:-------------------:|:----------:|
+| simple recall  | 0/3 (0%)   |   3/3 (100%)    |     3/3 (100%)      | 3/3 (100%) |
+| multi-hop      | 0/2 (0%)   |    1/2 (50%)    |      0/2 (0%)       | 2/2 (100%) |
+| **correction** | 0/2 (0%)   |  **0/2 (0%)**   |    **0/2 (0%)**     | **2/2 (100%)** |
+| **temporal**   | 0/3 (0%)   |  **0/3 (0%)**   |    **0/3 (0%)**     | **3/3 (100%)** |
+| **overall**    | 0/10 (0%)  |  **4/10 (40%)** |    **3/10 (30%)**   | **10/10 (100%)** |
 
-**Flat vector RAG passes only simple recall and scores 0% on every structural
-category.** The clearest case is **temporal**: asked *"who led Project Zephyr in
-2020?"* the flat store retrieves all three (undated) leadership facts and answers
-*"the context lists three people…"* — it has no notion of an effective date. c0
-stores each tenure with `valid_at`/`expired_at` and an `as-of` walk returns the
-one person who held the role on that date. **Correction** is the same shape: the
-flat store holds both the old and new value as equal blobs and reports a
+**The vector arms pass simple recall and score 0% on correction and temporal.**
+The clearest case is **temporal**: asked *"who led Project Zephyr in 2020?"* the
+flat store retrieves all three (undated) leadership facts and answers *"the
+context lists three people…"* — it has no notion of an effective date. c0 stores
+each tenure with `valid_at`/`expired_at` and an `as-of` walk returns the one
+person who held the role on that date. **Correction** is the same shape: the flat
+store holds both the old and new value as equal blobs and reports a
 *"contradiction"*; c0 knows (via the `corrects` edge) which value is current.
+
+**Adding an LLM reranker doesn't help.** The `flat RAG + reranker` arm pulls a
+wider candidate pool and asks the model to pick the most relevant passages — yet
+correction and temporal stay at 0%. Reranking *reorders* passages; it cannot
+synthesize an effective date or a supersession signal that isn't in the text.
+The gap isn't retrieval quality, it's **representation** — the whole argument for
+a temporal graph. (Multi-hop varies by ±1 between the flat arms at N=2; that's
+noise, not a reranker effect.)
 
 ## Why the facts are invented
 
@@ -40,17 +48,18 @@ bare model can only hallucinate or refuse (hence 0% across the board), which
 means any points the other arms score are attributable to the **memory layer**,
 not the model.
 
-## The three arms
+## The arms
 
-| arm        | what it is                                                                    |
-|------------|-------------------------------------------------------------------------------|
-| `bare`     | the model alone, no context. Floor.                                            |
-| `flat_rag` | embed every fact as a prose blob, cosine-retrieve top-k, stuff into context. The vector-store baseline. |
-| `c0`       | the real c0 retrieval cascade (exact → fulltext → hybrid), temporal- and patch-aware. |
+| arm           | what it is                                                                    |
+|---------------|-------------------------------------------------------------------------------|
+| `bare`        | the model alone, no context. Floor.                                           |
+| `flat_rag`    | embed every fact as a prose blob, cosine-retrieve top-k, stuff into context. The vector-store baseline. |
+| `flat_rerank` | `flat_rag` with a wider candidate pool (top-8) re-ranked by the LLM down to top-4. The "but a real stack uses a reranker" arm. |
+| `c0`          | the real c0 retrieval cascade (exact → fulltext → hybrid), temporal- and patch-aware. |
 
-All three arms answer the **same** questions and are graded by the **same** LLM
-judge. The flat arm and the c0 arm are given the **same ground truth** — the
-only difference is how that knowledge is represented and retrieved.
+Every arm answers the **same** questions and is graded by the **same** LLM judge.
+The vector arms and the c0 arm are given the **same ground truth** — the only
+difference is how that knowledge is represented and retrieved.
 
 ## The four categories
 
@@ -72,8 +81,8 @@ c0 bench --seed-only
 # 2. run all three arms
 c0 bench --arms bare,flat_rag,c0
 
-# or seed + run in one shot, with 3 trials per question (majority vote)
-c0 bench --seed --arms bare,flat_rag,c0 --trials 3
+# or seed + run all four arms, 3 trials per question (majority vote)
+c0 bench --seed --arms bare,flat_rag,flat_rerank,c0 --trials 3
 ```
 
 `--trials N` runs each question N times and takes the majority verdict, which
@@ -107,10 +116,13 @@ cell rather than aborting).
 - **LLM-as-judge** introduces some grading noise; the judge is prompted to grade on
   the key fact only and to treat refusals as incorrect. `--trials N` with majority
   vote is the mitigation; the headline numbers use `--trials 3`.
-- **The flat-RAG arm is a faithful-but-minimal baseline** (embed → cosine top-k).
-  A production vector stack adds rerankers, metadata filters, and recency
-  heuristics — but those are bolt-ons that approximate, case by case, the temporal
-  and corrective structure c0 represents natively.
+- **The vector baselines are honest but not exhaustive.** `flat_rag` is plain
+  embed → cosine top-k; `flat_rerank` adds an LLM reranker. A production stack
+  could also add explicit metadata filters and recency heuristics — but those are
+  per-case bolt-ons that re-implement, by hand, the temporal and corrective
+  structure c0 represents natively. The reranker arm already shows that improving
+  *retrieval ranking* does nothing for correction/temporal, because the gap is
+  representation, not ranking.
 
 ## Why this exists
 
