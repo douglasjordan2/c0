@@ -54,6 +54,38 @@ query ──▶ ❶ exact match ─▶ ❷ keyword (BM25) ─▶ ❸ hybrid (BM2
 
 ![a dead end is classified and committed](assets/demo-reflect.gif)
 
+## Benchmark — does structured memory actually beat a vector store?
+
+"It helps" is easy to assert. `c0 bench` makes it falsifiable: it seeds a
+*synthetic* knowledge world (invented entities no model saw in training), then
+answers the same questions three ways — a **bare model**, a **naive flat vector
+store** (embed → cosine top-k), and **c0** — and grades every answer with an LLM
+judge. Because the facts are invented, the score isolates what the *memory layer*
+adds, not the model's prior knowledge.
+
+10 questions, 4 categories, 3 trials each (majority vote):
+
+| category       | bare model | flat vector RAG | + LLM reranker  |     c0     |
+|----------------|:----------:|:---------------:|:---------------:|:----------:|
+| simple recall  | 0/3 (0%)   |   3/3 (100%)    |   3/3 (100%)    | 3/3 (100%) |
+| multi-hop      | 0/2 (0%)   |    1/2 (50%)    |    0/2 (0%)     | 2/2 (100%) |
+| correction     | 0/2 (0%)   |   **0/2 (0%)**  |   **0/2 (0%)**  | 2/2 (100%) |
+| temporal       | 0/3 (0%)   |   **0/3 (0%)**  |   **0/3 (0%)**  | 3/3 (100%) |
+| **overall**    | 0/10 (0%)  |   4/10 (40%)    |    3/10 (30%)   | **10/10 (100%)** |
+
+A vector store handles **simple recall** and not much else: it can't tell a
+corrected fact from the stale one it replaced (correction) and has no notion of
+an effective date (temporal) — and **adding an LLM reranker doesn't help**, because
+reranking reorders passages without synthesizing the date/supersession metadata
+that isn't in the text. Those are exactly what c0's temporal graph represents
+natively.
+
+```bash
+c0 bench --seed --arms bare,flat_rag,flat_rerank,c0 --trials 3
+```
+
+Full methodology, the synthetic corpus, and honest limitations: **[BENCH.md](BENCH.md)**.
+
 ## Requirements
 
 - **Rust** (2024 edition — 1.85+)

@@ -1,4 +1,5 @@
 mod audit;
+mod bench;
 mod claude;
 mod config;
 mod embeddings;
@@ -101,6 +102,21 @@ enum Commands {
     },
     Migrate,
     Status,
+    /// Run the reproducible memory benchmark (bare model vs flat RAG vs c0).
+    Bench {
+        /// Seed the synthetic c0-bench graph before running (idempotent).
+        #[arg(long)]
+        seed: bool,
+        /// Only seed the graph; do not run the eval.
+        #[arg(long)]
+        seed_only: bool,
+        /// Comma-separated arms to run: bare,flat_rag,flat_rerank,c0
+        #[arg(long, default_value = "bare,flat_rag,c0")]
+        arms: String,
+        /// Trials per question; the majority verdict is used (reduces LLM noise).
+        #[arg(long, default_value = "1")]
+        trials: u32,
+    },
     Describe {
         concept: String,
         description: String,
@@ -819,6 +835,7 @@ fn cmd_kind(c: &Commands) -> &'static str {
         Commands::Turns { .. } => "turns",
         Commands::Migrate => "migrate",
         Commands::Status => "status",
+        Commands::Bench { .. } => "bench",
         Commands::Describe { .. } => "describe",
         Commands::Reflector { .. } => "reflector",
         Commands::Fetch { .. } => "fetch",
@@ -1344,6 +1361,25 @@ async fn main() -> Result<()> {
     let graph_conn = graph::connect().await?;
 
     match cli.command {
+        Commands::Bench {
+            seed,
+            seed_only,
+            arms,
+            trials,
+        } => {
+            let arms: Vec<String> = arms
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| ["bare", "flat_rag", "flat_rerank", "c0"].contains(&s.as_str()))
+                .collect();
+            if seed_only {
+                let sem = config::SemanticConfig::load();
+                bench::seed(&graph_conn, &sem).await?;
+            } else {
+                bench::run(&graph_conn, &arms, seed, trials.max(1)).await?;
+            }
+            return Ok(());
+        }
         Commands::Add { what } => match what {
             AddCommands::Concept {
                 name,
