@@ -3,6 +3,7 @@ mod bench;
 mod claude;
 mod config;
 mod embeddings;
+mod eval;
 mod export;
 mod extract;
 mod fetch;
@@ -116,6 +117,24 @@ enum Commands {
         /// Trials per question; the majority verdict is used (reduces LLM noise).
         #[arg(long, default_value = "1")]
         trials: u32,
+    },
+    /// Measure retrieval quality (recall@k, MRR) over the cascade fixture.
+    Eval {
+        /// Seed the synthetic c0-bench fixture before running (idempotent).
+        #[arg(long)]
+        seed: bool,
+        /// Rank cutoff for recall@k / precision@k.
+        #[arg(long, default_value = "3")]
+        k: usize,
+        /// Run an opt-in LLM-as-judge context-relevance pass on the top hit.
+        #[arg(long)]
+        judge: bool,
+        /// Force the fulltext-only path (CI / no Ollama); skips vector/temporal queries.
+        #[arg(long)]
+        no_embeddings: bool,
+        /// Fail (non-zero exit) if recall@k drops below this threshold (CI gate).
+        #[arg(long)]
+        min_recall: Option<f32>,
     },
     Describe {
         concept: String,
@@ -836,6 +855,7 @@ fn cmd_kind(c: &Commands) -> &'static str {
         Commands::Migrate => "migrate",
         Commands::Status => "status",
         Commands::Bench { .. } => "bench",
+        Commands::Eval { .. } => "eval",
         Commands::Describe { .. } => "describe",
         Commands::Reflector { .. } => "reflector",
         Commands::Fetch { .. } => "fetch",
@@ -1378,6 +1398,26 @@ async fn main() -> Result<()> {
             } else {
                 bench::run(&graph_conn, &arms, seed, trials.max(1)).await?;
             }
+            return Ok(());
+        }
+        Commands::Eval {
+            seed,
+            k,
+            judge,
+            no_embeddings,
+            min_recall,
+        } => {
+            eval::run(
+                &graph_conn,
+                &eval::EvalOpts {
+                    do_seed: seed,
+                    k,
+                    judge,
+                    no_embeddings,
+                    min_recall,
+                },
+            )
+            .await?;
             return Ok(());
         }
         Commands::Add { what } => match what {

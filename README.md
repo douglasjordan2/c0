@@ -86,6 +86,25 @@ c0 bench --seed --arms bare,flat_rag,flat_rerank,c0 --trials 3
 
 Full methodology, the synthetic corpus, and honest limitations: **[BENCH.md](BENCH.md)**.
 
+### Retrieval eval — is the *right* concept surfacing?
+
+`c0 bench` measures end-to-end answer quality; `c0 eval` measures the narrower
+thing the retrieval cascade is responsible for: given a natural-language query,
+does the **right concept rank in the top _k_**? It scores the cascade over the
+same synthetic fixture with the standard IR metrics — **recall@k** and **MRR** —
+so a change to `HybridSearchConfig`, the RRF fusion, or the fulltext query builder
+that silently degrades retrieval shows up as a number instead of a feeling.
+
+```bash
+c0 eval --seed --k 3                 # full cascade (exact → fulltext → hybrid, temporal)
+c0 eval --seed --no-embeddings       # fulltext-only; no Ollama/API needed (the CI path)
+c0 eval --judge                      # + opt-in LLM-as-judge context-relevance pass
+```
+
+The fulltext-only path is **local-first** (Neo4j only), so CI runs it as a gate
+(`--min-recall`) and fails the build on a regression — no model dependency
+required. Details and the golden set: **[EVAL.md](EVAL.md)**.
+
 ## Requirements
 
 - **Rust** (2024 edition — 1.85+)

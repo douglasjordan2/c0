@@ -34,7 +34,7 @@ use crate::embeddings::{self, OllamaClient};
 use crate::graph;
 use neo4rs::query;
 
-const NAMESPACE: &str = "c0-bench";
+pub(crate) const NAMESPACE: &str = "c0-bench";
 
 // ---------------------------------------------------------------------------
 // The synthetic knowledge world.
