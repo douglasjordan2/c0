@@ -515,6 +515,12 @@ enum AuditCommands {
         all: bool,
         #[arg(
             long,
+            help = "Enrich every namespace with orphans across the whole graph (not just known namespaces)",
+            conflicts_with_all = ["all", "namespace"]
+        )]
+        graph_wide: bool,
+        #[arg(
+            long,
             default_value = "0.82",
             help = "Min cosine similarity for same-namespace links"
         )]
@@ -3230,6 +3236,7 @@ async fn main() -> Result<()> {
             AuditCommands::Enrich {
                 namespace,
                 all,
+                graph_wide,
                 same_threshold,
                 cross_threshold,
                 max_links,
@@ -3245,7 +3252,9 @@ async fn main() -> Result<()> {
                     };
                     audit::enrich_rollback(&graph_conn, run, json).await?;
                 } else {
-                    let targets: Vec<String> = if all {
+                    let targets: Vec<String> = if graph_wide {
+                        audit::orphan_namespaces(&graph_conn).await?
+                    } else if all {
                         ctx.namespaces.clone()
                     } else {
                         vec![namespace.unwrap_or_else(|| ctx.namespace.clone())]
