@@ -83,6 +83,13 @@ assert_contains "vector search finds concept (real embeddings)" "reciprocal rank
 assert_contains "keyword search finds concept" "bm25" \
   c0 search "bm25" --keyword-only
 
+# Retrieval eval: the full cascade (exact -> fulltext -> hybrid + temporal) over
+# real embeddings resolves its golden set. This exercises the vector and temporal
+# tiers the fulltext-only CI eval-gate can't reach; --min-recall makes the command
+# self-asserting (it exits non-zero, failing this assertion, on a regression).
+assert_contains "eval: full cascade recall is high (real embeddings)" "gate passed" \
+  c0 eval --seed --k 3 --min-recall 0.9
+
 # Temporal: the superseding concept is present and walkable.
 assert_contains "supersession recorded" "app router" \
   c0 walk "app router"
