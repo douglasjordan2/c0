@@ -37,3 +37,49 @@ jobs:
 
       - name: Test
         run: cargo test --all-features --verbose
+
+  eval-gate:
+    name: retrieval eval gate
+    runs-on: ubuntu-latest
+    services:
+      neo4j:
+        image: neo4j:5
+        env:
+          NEO4J_AUTH: neo4j/testpassword
+        ports:
+          - 7687:7687
+          - 7474:7474
+    env:
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: testpassword
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Wait for Neo4j
+        run: |
+          for i in $(seq 1 60); do
+            if bash -c 'cat < /dev/null > /dev/tcp/localhost/7687' 2>/dev/null; then
+              echo "Neo4j bolt is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Neo4j did not become ready"; exit 1
+
+      - name: Bootstrap schema (fulltext indexes)
+        run: ./target/debug/c0 migrate
+
+      # Fulltext-only path: no Ollama/API dependency. Catches regressions in the
+      # exact + fulltext tiers and the fixture. The vector/temporal tiers are
+      # covered by local runs and the RRF unit tests.
+      - name: Retrieval gate (recall@3 ≥ 0.8, fulltext-only)
+        run: ./target/debug/c0 eval --seed --no-embeddings --k 3 --min-recall 0.8

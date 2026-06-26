@@ -32,12 +32,20 @@ git config core.hooksPath .githooks
 - `pre-commit` runs `cargo fmt --all --check` + `cargo clippy` (seconds).
 - `pre-push` runs the full `scripts/ci.sh`.
 
+The rule of thumb: **what's _required_ is what CI checks.** Everything CI enforces is
+listed here; anything below this that CI can't run (the live Docker stack) is
+*recommended*, not a merge blocker.
+
 What CI enforces:
 - `cargo fmt --all` — the CI checks formatting.
 - `cargo clippy --all-features` — keep it clean. The crate forbids `unsafe` and lints with
   Clippy `pedantic`.
 - `cargo build --features sessions` as well as the default build.
 - `cargo test --all-features`.
+- **Retrieval gate** — the `eval-gate` job stands up an ephemeral Neo4j and runs
+  `c0 eval --no-embeddings` (fulltext-only, no model needed), failing the build if
+  `recall@k` regresses. This is the automated guard for the retrieval cascade; see
+  [EVAL.md](EVAL.md).
 - Update the README if you change commands or behavior.
 
 ## Testing against a live stack (Docker)
@@ -65,8 +73,13 @@ LLM (concept extraction / enrichment) is **not required** — set
 `C0_ENRICH_CHAT_MODEL=<ollama-model>` to also run live enrichment and assert it links
 concepts.
 
-**Required for PRs that touch `src/graph.rs`, retrieval/ranking, or the sessions
-feature.** When you change a command's behavior, add or update an assertion in
+**Run this when you change retrieval _behavior_** — the Cypher, the BM25/vector/RRF
+ranking, or the temporal filters in `src/graph.rs` — or the sessions feature. Adding a
+read-only command *over* existing retrieval doesn't require it: the automated retrieval
+gate (above) already covers that path. CI can't run this live stack (it needs a real
+Ollama), so it's the one check that's on you locally rather than enforced server-side.
+
+When you change a command's behavior, add or update an assertion in
 `scripts/integration-test.sh`; extend `scripts/seed-test-graph.sh` and
 `tests/fixtures/` if you need new seed data.
 
