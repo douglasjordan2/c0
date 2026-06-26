@@ -487,6 +487,31 @@ async fn apply_edge(graph: &Graph, edge: &EnrichEdge, run_id: &str) -> Result<bo
     }
 }
 
+/// Every namespace that currently holds at least one live knowledge-orphaned
+/// concept. Backs `--graph-wide`, which sweeps the whole graph instead of just
+/// the caller's context-known namespaces. Concepts with a NULL namespace are
+/// skipped: the per-namespace MATCH can't target them, same as the other paths.
+pub async fn orphan_namespaces(graph: &Graph) -> Result<Vec<String>> {
+    let q = query(
+        r"
+        MATCH (c:Concept)
+        WHERE c.invalid_at IS NULL AND c.expired_at IS NULL
+          AND c.namespace IS NOT NULL AND NOT (c)--(:Concept)
+        RETURN DISTINCT c.namespace AS ns
+        ORDER BY ns
+        ",
+    );
+
+    let mut result = graph.execute(q).await?;
+    let mut namespaces = Vec::new();
+    while let Some(row) = result.next().await? {
+        if let Ok(ns) = row.get::<String>("ns") {
+            namespaces.push(ns);
+        }
+    }
+    Ok(namespaces)
+}
+
 pub async fn enrich(
     graph: &Graph,
     targets: &[String],
