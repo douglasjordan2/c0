@@ -426,6 +426,29 @@ pub async fn get_concepts_without_embeddings(
     Ok(concepts)
 }
 
+/// Neo4j has no way to bind a relationship type as a query parameter, so
+/// `relate` must interpolate `rel_type` into the Cypher text. Restrict it to
+/// a plain Cypher identifier (ASCII letter/underscore start, then
+/// alphanumeric/underscore) before that happens, or a crafted value like
+/// `X]->(n) DETACH DELETE n //` could break out of the relationship-type
+/// position and run arbitrary Cypher.
+fn validate_rel_type(rel_type: &str) -> Result<()> {
+    let mut chars = rel_type.chars();
+    let starts_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    if !starts_ok || !rest_ok || rel_type.len() > 64 {
+        anyhow::bail!(
+            "Invalid relationship type '{rel_type}': must start with a letter or \
+             underscore, contain only letters, digits, and underscores, and be \
+             64 characters or fewer."
+        );
+    }
+    Ok(())
+}
+
 pub async fn relate(
     graph: &Graph,
     from: &str,
@@ -433,6 +456,8 @@ pub async fn relate(
     to: &str,
     namespaces: &[String],
 ) -> Result<()> {
+    validate_rel_type(rel_type)?;
+
     let cypher = if rel_type == "HAS_PATCH" {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:KnowledgePatch {{name: $to}}) \
@@ -3844,5 +3869,30 @@ mod tests {
     fn scores_are_clamped_to_one() {
         let fused = reciprocal_rank_fusion("q", &[result("alpha")], &[result("alpha")], 0.4, 60.0);
         assert!(fused.iter().all(|r| r.similarity <= 1.0));
+    }
+
+    #[test]
+    fn validate_rel_type_accepts_normal_names() {
+        for ok in ["USES", "DEPENDS_ON", "HAS_PATCH", "_private", "a", "A1_b2"] {
+            assert!(validate_rel_type(ok).is_ok(), "expected {ok:?} to be valid");
+        }
+    }
+
+    #[test]
+    fn validate_rel_type_rejects_cypher_injection_attempts() {
+        for bad in [
+            "X]->(n) DETACH DELETE n //",
+            "USES) DETACH DELETE (a",
+            "with space",
+            "trailing-dash",
+            "1STARTS_WITH_DIGIT",
+            "",
+            &"A".repeat(65),
+        ] {
+            assert!(
+                validate_rel_type(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
     }
 }

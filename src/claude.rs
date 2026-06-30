@@ -477,6 +477,11 @@ impl LlmClient {
         prompt: &str,
         resume_session: Option<&str>,
     ) -> Result<LlmResponse> {
+        // Deliberately never pass `--auto`: droid defaults to read-only
+        // (no file/system modifications) without it, which is what a
+        // classification/extraction call processing untrusted text needs.
+        // `--auto low|medium|high` or `--skip-permissions-unsafe` would grant
+        // it write/shell access -- do not add them here.
         let mut args = vec![
             "exec".to_string(),
             "--output-format".to_string(),
@@ -519,6 +524,11 @@ impl LlmClient {
         if resume_session.is_some() {
             args.push("resume".to_string());
         }
+        // EXPERIMENTAL provider, not exercised by the maintainer. Relies on
+        // `codex exec` being read-only by default. If you actually use codex,
+        // verify against your installed version whether an explicit
+        // `--sandbox read-only` / `--ask-for-approval never` is needed to keep
+        // this classification/extraction call from touching the filesystem.
 
         if let Some(schema_path) = &schema_path {
             args.push("--output-schema".to_string());
@@ -641,7 +651,18 @@ impl LlmClient {
     }
 
     async fn generate_kilo(&self, prompt: &str) -> Result<LlmResponse> {
-        let args = vec!["--auto".to_string(), prompt.to_string()];
+        // EXPERIMENTAL provider, not exercised by the maintainer. The intent
+        // is to avoid `--auto` (auto-approve all permissions) and instead run
+        // the built-in read-only `plan` agent so this untrusted-text call
+        // can't edit files or run arbitrary shell. The exact `run --agent plan`
+        // invocation is UNVERIFIED against a live kilo install -- if you use
+        // kilo, confirm these flags and the `plan` agent's permissions.
+        let args = vec![
+            "run".to_string(),
+            "--agent".to_string(),
+            "plan".to_string(),
+            prompt.to_string(),
+        ];
 
         let output = self.run_cli(&args, None).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
