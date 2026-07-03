@@ -328,15 +328,29 @@ pub fn apply() -> Result<()> {
             }
 
             // Pass --force so the fuzzy-duplicate guard in `add concept` can't
-            // silently skip (exit 0 without creating) the concept the classifier
-            // already decided to COMMIT. Pass the reason as the description so the
-            // new node gets an embedding and is actually retrievable.
-            let mut args: Vec<&str> = vec!["add", "concept", concept, "--force"];
+            // silently skip the concept the classifier already decided to COMMIT.
+            // --quiet suppresses suggestion noise. --source reflector stamps
+            // provenance so the reflector's output can be audited (otherwise it
+            // is indistinguishable from manual adds). Pass the reason as the
+            // description so the new node gets an embedding and is retrievable.
+            let mut args: Vec<&str> = vec![
+                "add",
+                "concept",
+                concept,
+                "--force",
+                "--quiet",
+                "--source",
+                "reflector",
+            ];
             if !reason.is_empty() {
                 args.push("-d");
                 args.push(reason);
             }
-            let result = Command::new("c0").args(&args).output();
+            // Invoke this same binary by absolute path rather than relying on `c0`
+            // being on $PATH — under systemd the daemon's $PATH often lacks the
+            // user's cargo bin dir, which silently breaks every commit.
+            let exe = std::env::current_exe().unwrap_or_else(|_| "c0".into());
+            let result = Command::new(exe).args(&args).output();
 
             match result {
                 Ok(output) if output.status.success() => {

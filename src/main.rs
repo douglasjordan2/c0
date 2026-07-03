@@ -63,6 +63,8 @@ enum Commands {
         as_of: Option<String>,
         #[arg(long, help = "Include expired/invalidated knowledge")]
         include_expired: bool,
+        #[arg(long, help = "Max related nodes to return")]
+        limit: Option<i64>,
     },
     Find {
         pattern: String,
@@ -265,6 +267,12 @@ enum AddCommands {
         to: Option<String>,
         #[arg(long, help = "When this knowledge became true (ISO 8601 date)")]
         valid_at: Option<String>,
+        #[arg(
+            long,
+            short = 'q',
+            help = "Suppress the duplicate-suggestion output (for hook/script use)"
+        )]
+        quiet: bool,
     },
     Patch {
         name: String,
@@ -559,6 +567,11 @@ enum MoveCommands {
         to: String,
         #[arg(long, help = "Also move associated patches")]
         with_patches: bool,
+    },
+    Patch {
+        name: String,
+        #[arg(long, help = "Target namespace")]
+        to: String,
     },
     Prefix {
         prefix: String,
@@ -914,12 +927,12 @@ async fn main() -> Result<()> {
         default_hook(info);
     }));
 
+    // "c0=info" is a compile-time-constant directive that cannot fail to parse.
+    #[allow(clippy::expect_used)]
+    let c0_directive = "c0=info".parse().expect("valid directive");
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false))
-        .with(
-            EnvFilter::from_default_env()
-                .add_directive("c0=info".parse().expect("valid directive")),
-        )
+        .with(EnvFilter::from_default_env().add_directive(c0_directive))
         .init();
 
     let cli = Cli::parse();
@@ -1435,6 +1448,7 @@ async fn main() -> Result<()> {
                 force,
                 to,
                 valid_at,
+                quiet,
             } => {
                 let target_namespace = to.as_ref().unwrap_or(&ctx.namespace);
 
@@ -1458,7 +1472,9 @@ async fn main() -> Result<()> {
                     if let Some(client) = embeddings::OllamaClient::from_config(&semantic_config) {
                         match client.embed(&embed_text).await {
                             Ok(emb) => {
-                                println!("Generated embedding for '{name}'");
+                                if !quiet {
+                                    println!("Generated embedding for '{name}'");
+                                }
                                 Some(emb)
                             }
                             Err(e) => {
@@ -1484,17 +1500,27 @@ async fn main() -> Result<()> {
                     .unwrap_or_default();
 
                     if !similar.is_empty() {
-                        println!("⚠️  Similar concepts already exist:");
-                        for (similar_name, similarity) in &similar {
-                            println!("   - {} ({:.0}% similar)", similar_name, similarity * 100.0);
+                        if !quiet {
+                            println!("⚠️  Similar concepts already exist:");
+                            for (similar_name, similarity) in &similar {
+                                println!(
+                                    "   - {} ({:.0}% similar)",
+                                    similar_name,
+                                    similarity * 100.0
+                                );
+                            }
+                            println!();
+                            println!("Consider:");
+                            if let Some((best_name, _)) = similar.first() {
+                                println!("  c0 relate {name} RELATED_TO {best_name}");
+                            }
+                            println!("  c0 add concept {name} --force  # to create anyway");
                         }
-                        println!();
-                        println!("Consider:");
-                        if let Some((best_name, _)) = similar.first() {
-                            println!("  c0 relate {name} RELATED_TO {best_name}");
-                        }
-                        println!("  c0 add concept {name} --force  # to create anyway");
-                        return Ok(());
+                        // Exit with a distinct non-zero code so callers checking
+                        // `$?` can tell "blocked as duplicate" (2) apart from
+                        // success (0) and hard failure (1). Previously this
+                        // returned Ok, so scripts believed the concept was created.
+                        std::process::exit(2);
                     }
                 }
 
@@ -1629,8 +1655,10 @@ async fn main() -> Result<()> {
             live,
             as_of,
             include_expired,
+            limit,
         } => {
             let timer = Instant::now();
+            let walk_limit = limit.unwrap_or(graph::WALK_DEFAULT_LIMIT);
 
             let temporal = {
                 let mut t = graph::TemporalQuery::default();
@@ -1658,9 +1686,15 @@ async fn main() -> Result<()> {
             let mut patches =
                 graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal)
                     .await?;
-            let mut connected =
-                graph::traverse_temporal(&graph_conn, &concept, depth, &ctx.namespaces, &temporal)
-                    .await?;
+            let mut connected = graph::traverse_temporal(
+                &graph_conn,
+                &concept,
+                depth,
+                &ctx.namespaces,
+                &temporal,
+                walk_limit,
+            )
+            .await?;
 
             if patches.is_empty() && connected.is_empty() {
                 let ft_matches =
@@ -1695,6 +1729,7 @@ async fn main() -> Result<()> {
                         depth,
                         &ctx.namespaces,
                         &temporal,
+                        walk_limit,
                     )
                     .await?;
                 }
@@ -1740,6 +1775,7 @@ async fn main() -> Result<()> {
                                 depth,
                                 &ctx.namespaces,
                                 &temporal,
+                                walk_limit,
                             )
                             .await?;
                         }
@@ -1897,7 +1933,10 @@ async fn main() -> Result<()> {
         Commands::Find { pattern } => {
             let results = graph::find_pattern(&graph_conn, &pattern).await?;
             if results.is_empty() {
-                log_dead_end("find", &pattern, &ctx.namespace, None);
+                // Don't log `find` misses as knowledge dead-ends: `find` takes raw
+                // Cypher, and a zero-row diagnostic query is usually the desired
+                // outcome, not a missing concept. The classifier would only have to
+                // discard these, burning cycles. `walk` remains the real signal.
                 println!("No matches for pattern");
             } else {
                 println!("Pattern results:");
@@ -2482,29 +2521,56 @@ async fn main() -> Result<()> {
             description,
         } => {
             let semantic_config = config::SemanticConfig::load();
-            let client = if let Some(c) = embeddings::OllamaClient::from_config(&semantic_config) {
-                c
-            } else {
-                eprintln!("Error: Semantic search not configured. Check ~/.c0/config.toml");
-                return Ok(());
+            let client = embeddings::OllamaClient::from_config(&semantic_config);
+
+            // Try to regenerate the embedding, but never let an Ollama outage block
+            // the description write. On failure, persist the text and let
+            // `c0 backfill embeddings` pick up the missing embedding later.
+            let embed_text = format!("{concept}: {description}");
+            let embedding = match &client {
+                Some(c) => match c.embed(&embed_text).await {
+                    Ok(emb) => Some(emb),
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: could not generate embedding ({e}); writing description \
+                             without it. Run `c0 backfill embeddings` once Ollama is back."
+                        );
+                        None
+                    }
+                },
+                None => None,
             };
 
-            let embed_text = format!("{concept}: {description}");
-            let embedding = client.embed(&embed_text).await?;
-
-            let updated = graph::update_concept_description(
-                &graph_conn,
-                &concept,
-                &ctx.namespace,
-                &description,
-                &embedding,
-            )
-            .await?;
+            let updated = match &embedding {
+                Some(emb) => {
+                    graph::update_concept_description(
+                        &graph_conn,
+                        &concept,
+                        &ctx.namespace,
+                        &description,
+                        emb,
+                    )
+                    .await?
+                }
+                None => {
+                    graph::update_concept_description_text_only(
+                        &graph_conn,
+                        &concept,
+                        &ctx.namespace,
+                        &description,
+                    )
+                    .await?
+                }
+            };
 
             if updated {
                 println!("Updated concept: {concept}");
                 println!("  description: {description}");
-                println!("  embedding: regenerated from description");
+                if embedding.is_some() {
+                    println!("  embedding: regenerated from description");
+                } else {
+                    println!("  embedding: skipped (backfill pending)");
+                }
             } else {
                 eprintln!(
                     "Concept '{}' not found in namespace '{}'",
@@ -2715,13 +2781,13 @@ async fn main() -> Result<()> {
                     // guess if that doesn't disambiguate — inlining the wrong
                     // client's data is worse than leaving the patch empty.
                     let ns_seg = format!("/{namespace}/");
-                    let ns_matches: Vec<PathBuf> = cands
+                    let mut ns_matches: Vec<PathBuf> = cands
                         .iter()
                         .filter(|c| c.to_string_lossy().contains(&ns_seg))
                         .cloned()
                         .collect();
-                    match ns_matches.len() {
-                        1 => Resolution::Found(ns_matches.into_iter().next().unwrap()),
+                    match (ns_matches.len(), ns_matches.pop()) {
+                        (1, Some(only)) => Resolution::Found(only),
                         _ => Resolution::Ambiguous(cands),
                     }
                 };
@@ -3291,6 +3357,23 @@ async fn main() -> Result<()> {
                     eprintln!("Concept '{name}' not found or already in namespace '{to}'");
                 }
             },
+            MoveCommands::Patch { name, to } => {
+                if !ctx.namespaces.contains(&to) {
+                    anyhow::bail!(
+                        "'{}' is not in the namespace chain {:?}",
+                        to,
+                        ctx.namespaces
+                    );
+                }
+                match graph::move_patch(&graph_conn, &name, &to).await? {
+                    Some(old) => {
+                        println!("✓ Moved patch: {name} [{old} → {to}]");
+                    }
+                    None => {
+                        eprintln!("Patch '{name}' not found or already in namespace '{to}'");
+                    }
+                }
+            }
             MoveCommands::Prefix {
                 prefix,
                 to,

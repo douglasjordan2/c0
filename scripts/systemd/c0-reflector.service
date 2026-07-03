@@ -1,0 +1,30 @@
+# c0 reflector — one discrete classify+apply cycle, driven by the paired .timer.
+#
+# This is the recommended deployment model: discrete oneshot runs triggered by a
+# systemd timer, rather than a long-running sleep-loop daemon. Oneshot runs get
+# journald logging, no clock drift, and OnUnitInactiveSec backpressure for free.
+#
+# Install (user units):
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/systemd/c0-reflector.{service,timer} ~/.config/systemd/user/
+#   # edit the paths below to match your install, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now c0-reflector.timer
+#   systemctl --user list-timers          # confirm it is scheduled
+#   journalctl --user -u c0-reflector -f  # watch it run
+
+[Unit]
+Description=c0 reflector — classify dead-end inbox and apply commits
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Point these at your environment. c0 must be able to reach Neo4j (and Ollama or
+# the Claude CLI, per your [claude] config).
+Environment=NEO4J_URI=bolt://localhost:7687
+Environment=NEO4J_USER=
+Environment=NEO4J_PASSWORD=
+# %h expands to the user's home dir. Adjust if you installed c0 elsewhere.
+ExecStart=%h/.cargo/bin/c0 reflector process
+ExecStart=%h/.cargo/bin/c0 reflector apply

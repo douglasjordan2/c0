@@ -211,34 +211,6 @@ pub async fn ping(graph: &Graph) -> Result<()> {
     Ok(())
 }
 
-pub async fn ensure_event(
-    graph: &Graph,
-    name: &str,
-    reason: Option<&str>,
-    namespace: &str,
-) -> Result<bool> {
-    let mut result = graph
-        .execute(
-            query(
-                "MERGE (e:Event {name: $name, namespace: $namespace})
-             ON CREATE SET e.reason = $reason, e.created_at = datetime()
-             RETURN e.name AS name,
-                    CASE WHEN e.created_at = datetime() THEN true ELSE false END AS created",
-            )
-            .param("name", name)
-            .param("namespace", namespace)
-            .param("reason", reason.unwrap_or("")),
-        )
-        .await?;
-
-    if let Some(row) = result.next().await? {
-        let created: bool = row.get("created").unwrap_or(false);
-        Ok(created)
-    } else {
-        Ok(false)
-    }
-}
-
 pub async fn add_concept(
     graph: &Graph,
     name: &str,
@@ -337,6 +309,32 @@ pub async fn update_concept_description(
             .param("namespace", namespace)
             .param("description", description)
             .param("embedding", embedding_vec),
+        )
+        .await?;
+
+    Ok(result.next().await?.is_some())
+}
+
+/// Update a concept's description without touching its embedding. Used when the
+/// embedding sidecar (Ollama) is unavailable: knowledge capture must not be
+/// blocked by a transient outage — `c0 backfill embeddings` can fill the
+/// embedding in later.
+pub async fn update_concept_description_text_only(
+    graph: &Graph,
+    name: &str,
+    namespace: &str,
+    description: &str,
+) -> Result<bool> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (c:Concept {name: $name, namespace: $namespace})
+             SET c.description = $description, c.updated_at = datetime()
+             RETURN c.name AS name",
+            )
+            .param("name", name)
+            .param("namespace", namespace)
+            .param("description", description),
         )
         .await?;
 
@@ -458,17 +456,19 @@ pub async fn relate(
 ) -> Result<()> {
     validate_rel_type(rel_type)?;
 
+    // Use MERGE, not CREATE: running the same `relate` twice (the normal
+    // hook/script usage mode) must not accrete duplicate edges.
     let cypher = if rel_type == "HAS_PATCH" {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:KnowledgePatch {{name: $to}}) \
              WHERE a.namespace IN $namespaces AND (b.namespace IS NULL OR b.namespace IN $namespaces) \
-             CREATE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
+             MERGE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
         )
     } else {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:Concept {{name: $to}}) \
              WHERE a.namespace IN $namespaces AND b.namespace IN $namespaces \
-             CREATE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
+             MERGE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
         )
     };
     let mut result = graph
@@ -499,25 +499,57 @@ pub async fn relate(
     Ok(())
 }
 
+/// Relationship types that are graph bookkeeping / session plumbing rather than
+/// knowledge, and so must never be traversed by `walk`. Invalidation and
+/// supersession have dedicated chain commands; the rest are session structure
+/// that concepts link into via `MENTIONED_IN` and would otherwise leak the
+/// entire 100k+-node session layer into walk output.
+pub const WALK_DENY_RELS: &[&str] = &[
+    "INVALIDATED_BY",
+    "SUPERSEDES",
+    "MENTIONED_IN",
+    "HAS_TURN",
+    "HAS_TOOL_CALL",
+    "CALLED",
+    "IN_SESSION",
+    "HAS_SESSION",
+];
+
+/// Default cap on the number of related nodes a single walk returns. Overridable
+/// via the `--limit` flag; the unbounded depth-2/3 expansion this replaces was a
+/// latency/memory risk on dense graphs.
+pub const WALK_DEFAULT_LIMIT: i64 = 200;
+
 pub async fn traverse_temporal(
     graph: &Graph,
     start: &str,
     depth: u32,
     namespaces: &[String],
     temporal: &TemporalQuery,
+    limit: i64,
 ) -> Result<Vec<String>> {
     let temporal_clause = temporal.build_and_clause("connected");
 
+    // Constrain the traversal to knowledge labels and exclude bookkeeping edges,
+    // and cap the result set. A bare `-[*1..depth]->(connected)` matches any
+    // label over any relationship type with no cap, which both leaks non-knowledge
+    // nodes into walks and is a latency risk on a dense graph.
     let cypher = format!(
-        "MATCH (start:Concept {{name: $start}})-[*1..{depth}]->(connected) \
-         WHERE start.namespace IN $namespaces AND connected.namespace IN $namespaces{temporal_clause} \
-         RETURN DISTINCT connected.name AS name"
+        "MATCH (start:Concept {{name: $start}})-[rels*1..{depth}]->(connected) \
+         WHERE start.namespace IN $namespaces AND connected.namespace IN $namespaces \
+         AND (connected:Concept OR connected:KnowledgePatch) \
+         AND none(r IN rels WHERE type(r) IN $deny_rels){temporal_clause} \
+         RETURN DISTINCT connected.name AS name \
+         LIMIT $limit"
     );
+    let deny_rels: Vec<String> = WALK_DENY_RELS.iter().map(|s| (*s).to_string()).collect();
     let mut result = graph
         .execute(
             query(&cypher)
                 .param("start", start)
-                .param("namespaces", namespaces.to_vec()),
+                .param("namespaces", namespaces.to_vec())
+                .param("deny_rels", deny_rels)
+                .param("limit", limit),
         )
         .await?;
 
@@ -984,26 +1016,44 @@ pub async fn invalidate_concept(
                 .await?
                 .is_some();
 
-            if !target_exists {
-                ensure_event(graph, by_name, reason, namespace).await?;
-            }
-
-            graph
-                .run(
-                    query(
-                        "MATCH (c:Concept {name: $name, namespace: $namespace})
+            if target_exists {
+                // The attribution target is a real node — link to it so the
+                // causal audit trail is traversable.
+                graph
+                    .run(
+                        query(
+                            "MATCH (c:Concept {name: $name, namespace: $namespace})
                      MATCH (target)
                      WHERE target.name = $by_name
                        AND (target:Concept OR target:Event OR target:KnowledgePatch)
                        AND (target.namespace IN $namespaces OR target.namespace IS NULL)
                      MERGE (c)-[:INVALIDATED_BY]->(target)",
+                        )
+                        .param("name", name)
+                        .param("namespace", namespace)
+                        .param("by_name", by_name)
+                        .param("namespaces", namespaces.to_vec()),
                     )
-                    .param("name", name)
-                    .param("namespace", namespace)
-                    .param("by_name", by_name)
-                    .param("namespaces", namespaces.to_vec()),
-                )
-                .await?;
+                    .await?;
+            } else {
+                // The target is freetext that doesn't resolve to an existing
+                // node. Record it as a property on the invalidated node instead
+                // of minting an Event, which would otherwise surface in `walk`
+                // traversals as if it were knowledge.
+                graph
+                    .run(
+                        query(
+                            "MATCH (c:Concept {name: $name, namespace: $namespace})
+                     SET c.invalidated_by_name = $by_name,
+                         c.invalidated_reason = $reason",
+                        )
+                        .param("name", name)
+                        .param("namespace", namespace)
+                        .param("by_name", by_name)
+                        .param("reason", reason.unwrap_or("")),
+                    )
+                    .await?;
+            }
         }
 
         Ok(Some(invalid_at_str))
@@ -1063,27 +1113,42 @@ pub async fn invalidate_patch(
                 .await?
                 .is_some();
 
-            if !target_exists {
-                ensure_event(graph, by_name, reason, namespace).await?;
-            }
-
-            graph
-                .run(
-                    query(
-                        "MATCH (p:KnowledgePatch {name: $name})
+            if target_exists {
+                graph
+                    .run(
+                        query(
+                            "MATCH (p:KnowledgePatch {name: $name})
                      WHERE p.namespace IS NULL OR p.namespace = $namespace
                      MATCH (target)
                      WHERE target.name = $by_name
                        AND (target:Concept OR target:Event OR target:KnowledgePatch)
                        AND (target.namespace IN $namespaces OR target.namespace IS NULL)
                      MERGE (p)-[:INVALIDATED_BY]->(target)",
+                        )
+                        .param("name", name)
+                        .param("namespace", namespace)
+                        .param("by_name", by_name)
+                        .param("namespaces", namespaces.to_vec()),
                     )
-                    .param("name", name)
-                    .param("namespace", namespace)
-                    .param("by_name", by_name)
-                    .param("namespaces", namespaces.to_vec()),
-                )
-                .await?;
+                    .await?;
+            } else {
+                // Unresolved freetext attribution: store on the patch node
+                // instead of minting a walk-polluting Event (see invalidate_concept).
+                graph
+                    .run(
+                        query(
+                            "MATCH (p:KnowledgePatch {name: $name})
+                     WHERE p.namespace IS NULL OR p.namespace = $namespace
+                     SET p.invalidated_by_name = $by_name,
+                         p.invalidated_reason = $reason",
+                        )
+                        .param("name", name)
+                        .param("namespace", namespace)
+                        .param("by_name", by_name)
+                        .param("reason", reason.unwrap_or("")),
+                    )
+                    .await?;
+            }
         }
 
         Ok(Some(invalid_at_str))
@@ -1861,6 +1926,44 @@ pub struct MoveResult {
     pub patches_moved: i64,
     pub old_namespace: String,
     pub new_namespace: String,
+}
+
+/// Relocate a patch to another namespace. Mirrors `move_concept` so a
+/// mis-scoped patch can be fixed in place instead of invalidate-and-recreate
+/// (which litters the graph with bookkeeping). Returns the old namespace on
+/// success, or `None` if no matching patch is found or it is already there.
+/// Patches created before namespacing may have a NULL namespace; those are
+/// treated as belonging to `global`.
+pub async fn move_patch(graph: &Graph, name: &str, to_namespace: &str) -> Result<Option<String>> {
+    let mut result = graph
+        .execute(
+            query(
+                "MATCH (p:KnowledgePatch {name: $name})
+                 WHERE coalesce(p.namespace, 'global') <> $to_namespace
+                 RETURN coalesce(p.namespace, 'global') AS old_namespace",
+            )
+            .param("name", name)
+            .param("to_namespace", to_namespace),
+        )
+        .await?;
+
+    let old_namespace: String = match result.next().await? {
+        Some(row) => row.get("old_namespace").unwrap_or_default(),
+        None => return Ok(None),
+    };
+
+    graph
+        .run(
+            query(
+                "MATCH (p:KnowledgePatch {name: $name})
+                 SET p.namespace = $to_namespace",
+            )
+            .param("name", name)
+            .param("to_namespace", to_namespace),
+        )
+        .await?;
+
+    Ok(Some(old_namespace))
 }
 
 pub async fn move_concept(
@@ -3793,6 +3896,7 @@ pub async fn mark_session_enriched(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

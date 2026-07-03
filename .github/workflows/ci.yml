@@ -26,6 +26,10 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
+      # The no-unwrap/no-expect policy is denied in Cargo.toml's [lints.clippy],
+      # so clippy now *fails* on a violation instead of emitting an ignored
+      # warning. `-D warnings` is not yet enabled repo-wide (200+ style warnings
+      # remain); tightening that is tracked separately.
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 

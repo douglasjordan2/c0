@@ -188,6 +188,27 @@ c0 reads connection details from the environment, with a per-namespace `.c0/conf
 
 Embedding host/model (Ollama) default to `http://localhost:11434` and `nomic-embed-text`, and are configurable.
 
+### Security & threat model
+
+The bundled `docker-compose.yml` runs Neo4j with **auth disabled** and binds its ports to
+`127.0.0.1` only. This is fine for the intended default: a **single-user local machine**, where
+the graph is trusted memory for one person.
+
+Be aware of the tradeoff: with auth off, *any* local process or user on the machine can read or
+rewrite the entire memory graph — and because this graph is explicitly positioned to **override the
+model's training data**, poisoning it is high-value. If you share the machine, run untrusted local
+code, or expose Neo4j beyond loopback, enable auth:
+
+```bash
+# Generate a password once and start Neo4j with it
+export NEO4J_AUTH="neo4j/$(openssl rand -hex 16)"
+docker compose up -d
+
+# Point the CLI at the same credentials
+export NEO4J_USER="neo4j"
+export NEO4J_PASSWORD="<the password from NEO4J_AUTH>"
+```
+
 ### Background LLM: local, API, or your Claude subscription
 
 The reflection loop, concept extraction, and session enrichment use a chat LLM. By default that's **local Ollama** — keyless and offline. To use Claude instead, set `[claude]` in `.c0/config.toml` to one of:
@@ -338,7 +359,20 @@ c0 reflector run --interval 15m       # tick more often
 c0 reflector run --no-apply           # classify only; hold COMMITs for human review
 ```
 
-For an always-on, unattended setup, prefer the OS scheduler over a long-lived process — cron and systemd handle restarts and logging for you:
+For an always-on, unattended setup, prefer **discrete scheduled runs** over the long-lived
+`c0 reflector run` loop. A systemd timer (or cron) firing `process` → `apply` each hour avoids clock
+drift, gets journald logging, and — with `OnUnitInactiveSec` — won't stack a new run on top of a
+slow one. Ready-to-edit user units ship in [`scripts/systemd/`](scripts/systemd/):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/systemd/c0-reflector.{service,timer} ~/.config/systemd/user/
+# edit the Environment= / ExecStart= paths, then:
+systemctl --user daemon-reload
+systemctl --user enable --now c0-reflector.timer
+```
+
+Cron works too:
 
 ```cron
 # Classify dead ends every hour and auto-commit. Keep a human in the loop?
