@@ -6,7 +6,7 @@ use std::time::Duration;
 pub struct OllamaClient {
     host: String,
     model: String,
-    timeout: Duration,
+    client: reqwest::Client,
 }
 
 #[derive(Serialize)]
@@ -22,10 +22,19 @@ struct EmbeddingResponse {
 
 impl OllamaClient {
     pub fn new(host: &str, model: &str, timeout_ms: u64) -> Self {
+        // Build the HTTP client once and reuse it across every `embed()` call so
+        // connection pooling actually kicks in — call sites loop over hundreds of
+        // items (backfill, sessions index, bench seeding). `reqwest::Client` is
+        // `Arc` internally, so cloning `OllamaClient` shares the same pool.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         Self {
             host: host.trim_end_matches('/').to_string(),
             model: model.to_string(),
-            timeout: Duration::from_millis(timeout_ms),
+            client,
         }
     }
 
@@ -43,17 +52,13 @@ impl OllamaClient {
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/api/embeddings", self.host);
 
-        let client = reqwest::Client::builder()
-            .timeout(self.timeout)
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
-
         let request = EmbeddingRequest {
             model: &self.model,
             prompt: text,
         };
 
-        let response = client
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()

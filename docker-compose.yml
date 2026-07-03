@@ -7,7 +7,13 @@ services:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     environment:
-      - NEO4J_AUTH=none
+      # Defaults to no auth for a single-user localhost dev box (ports are bound
+      # to 127.0.0.1 above). To harden — recommended if other users/processes
+      # share this machine — set NEO4J_AUTH before `docker compose up`, e.g.:
+      #   export NEO4J_AUTH="neo4j/$(openssl rand -hex 16)"
+      # then point the CLI at it with matching NEO4J_USER / NEO4J_PASSWORD.
+      # See the "Security & threat model" section of the README.
+      - NEO4J_AUTH=${NEO4J_AUTH:-none}
     volumes:
       - c0-neo4j-data:/data
 

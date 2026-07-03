@@ -1,0 +1,14 @@
+# Fire the c0 reflector hourly, measured from the end of the previous run so a
+# slow cycle can't stack up on the next trigger (OnUnitInactiveSec backpressure).
+# See c0-reflector.service for install instructions.
+
+[Unit]
+Description=Run the c0 reflector hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

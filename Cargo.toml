@@ -2,6 +2,7 @@
 name = "c0"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A bi-temporal knowledge-graph memory system for LLMs — hybrid keyword + vector retrieval over Neo4j, with a self-improving reflection loop."
 license = "MIT"
 repository = "https://github.com/douglasjordan2/c0"
@@ -35,8 +36,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unsafe_code = "forbid"
 
 [lints.clippy]
-unwrap_used = "warn"
-expect_used = "warn"
+# Denied so the stated no-unwrap/expect policy actually fails the build (and CI)
+# instead of passing as an ignored warning. Provably-infallible sites (static
+# regexes, const log directives) and test modules carry narrow `#[allow]`s.
+unwrap_used = "deny"
+expect_used = "deny"
 dbg_macro = "warn"
 print_stdout = "allow"
 print_stderr = "allow"

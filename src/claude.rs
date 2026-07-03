@@ -270,14 +270,12 @@ impl LlmClient {
             .map(|s| s == "claude-p")
             .unwrap_or(false);
 
-        let effective_prompt = if via_wrapper && has_schema {
-            format!(
+        let effective_prompt = match json_schema {
+            Some(schema) if via_wrapper => format!(
                 "{prompt}\n\nRespond with ONLY a JSON object matching this schema. \
-                 No prose, no markdown fences, no explanation.\n\nSchema:\n{}",
-                json_schema.unwrap()
-            )
-        } else {
-            prompt.to_string()
+                 No prose, no markdown fences, no explanation.\n\nSchema:\n{schema}"
+            ),
+            _ => prompt.to_string(),
         };
 
         let mut args = Vec::new();
@@ -1219,6 +1217,7 @@ fn parse_session_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

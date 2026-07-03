@@ -294,7 +294,15 @@ async fn c0_context(
     // 1. resolve the topic to a concept (exact, then fulltext, then hybrid)
     let mut concept = topic.to_string();
     let mut patches = graph::get_patches_temporal(graph, &concept, &ns, &temporal).await?;
-    let mut connected = graph::traverse_temporal(graph, &concept, depth, &ns, &temporal).await?;
+    let mut connected = graph::traverse_temporal(
+        graph,
+        &concept,
+        depth,
+        &ns,
+        &temporal,
+        graph::WALK_DEFAULT_LIMIT,
+    )
+    .await?;
     let mut desc = graph::get_concept_description(graph, &concept, &ns).await?;
 
     if patches.is_empty() && connected.is_empty() && desc.is_none() {
@@ -313,7 +321,15 @@ async fn c0_context(
             }
         }
         patches = graph::get_patches_temporal(graph, &concept, &ns, &temporal).await?;
-        connected = graph::traverse_temporal(graph, &concept, depth, &ns, &temporal).await?;
+        connected = graph::traverse_temporal(
+            graph,
+            &concept,
+            depth,
+            &ns,
+            &temporal,
+            graph::WALK_DEFAULT_LIMIT,
+        )
+        .await?;
         desc = graph::get_concept_description(graph, &concept, &ns).await?;
     }
 

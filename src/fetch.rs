@@ -394,6 +394,9 @@ async fn fetch_generic_url(url: &str) -> Result<FetchResult> {
     })
 }
 
+// The regexes below are compile-time constants that cannot fail to parse, so the
+// `expect`s are provably infallible — hence the narrow allow on this function.
+#[allow(clippy::expect_used)]
 fn extract_text_from_html(html: &str) -> String {
     static SCRIPT_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid regex"));
