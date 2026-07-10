@@ -1696,42 +1696,55 @@ async fn main() -> Result<()> {
             )
             .await?;
 
+            const FULLTEXT_COMMIT_SCORE: f32 = 50.0;
+            let mut ft_fallback: Option<(String, f32)> = None;
             if patches.is_empty() && connected.is_empty() {
                 let ft_matches =
                     graph::search_concepts_fulltext(&graph_conn, &start, 5, &ctx.namespaces)
                         .await?;
-                let query_terms: Vec<String> =
-                    start.split_whitespace().map(|t| t.to_lowercase()).collect();
-                let best = ft_matches.iter().find(|r| {
-                    let name_lower = r.name.to_lowercase();
-                    let matching = query_terms
+                let query_terms: Vec<String> = start
+                    .split(|c: char| c.is_whitespace() || c == '-')
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_lowercase)
+                    .collect();
+                let term_hits = |name: &str| {
+                    let name_lower = name.to_lowercase();
+                    query_terms
                         .iter()
                         .filter(|t| name_lower.contains(t.as_str()))
-                        .count();
-                    matching > query_terms.len() / 2
-                });
+                        .count()
+                };
+                let best = ft_matches
+                    .iter()
+                    .find(|r| term_hits(&r.name) > query_terms.len() / 2);
                 if let Some(best) = best {
-                    println!(
-                        "(fulltext: '{start}' -> '{}' [score: {:.2}])",
-                        best.name, best.similarity
-                    );
-                    concept = best.name.clone();
-                    patches = graph::get_patches_temporal(
-                        &graph_conn,
-                        &concept,
-                        &ctx.namespaces,
-                        &temporal,
-                    )
-                    .await?;
-                    connected = graph::traverse_temporal(
-                        &graph_conn,
-                        &concept,
-                        depth,
-                        &ctx.namespaces,
-                        &temporal,
-                        walk_limit,
-                    )
-                    .await?;
+                    if term_hits(&best.name) == query_terms.len()
+                        || best.similarity >= FULLTEXT_COMMIT_SCORE
+                    {
+                        println!(
+                            "(fulltext: '{start}' -> '{}' [score: {:.2}])",
+                            best.name, best.similarity
+                        );
+                        concept = best.name.clone();
+                        patches = graph::get_patches_temporal(
+                            &graph_conn,
+                            &concept,
+                            &ctx.namespaces,
+                            &temporal,
+                        )
+                        .await?;
+                        connected = graph::traverse_temporal(
+                            &graph_conn,
+                            &concept,
+                            depth,
+                            &ctx.namespaces,
+                            &temporal,
+                            walk_limit,
+                        )
+                        .await?;
+                    } else {
+                        ft_fallback = Some((best.name.clone(), best.similarity));
+                    }
                 }
             }
 
@@ -1756,30 +1769,85 @@ async fn main() -> Result<()> {
                         .await
                         .unwrap_or_default();
 
+                        const WALK_ENTRY_FANOUT: usize = 3;
                         if let Some((best_name, score)) = similar.first() {
-                            println!(
-                                "(hybrid: '{}' -> '{}' [rrf: {:.6}])",
-                                start, best_name, score
-                            );
                             concept = best_name.clone();
-                            patches = graph::get_patches_temporal(
-                                &graph_conn,
-                                &concept,
-                                &ctx.namespaces,
-                                &temporal,
-                            )
-                            .await?;
-                            connected = graph::traverse_temporal(
-                                &graph_conn,
-                                &concept,
-                                depth,
-                                &ctx.namespaces,
-                                &temporal,
-                                walk_limit,
-                            )
-                            .await?;
+                            let entries: Vec<String> = similar
+                                .iter()
+                                .take(WALK_ENTRY_FANOUT)
+                                .map(|(name, _)| name.clone())
+                                .collect();
+                            if entries.len() > 1 {
+                                println!(
+                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}], +merged: {})",
+                                    start,
+                                    best_name,
+                                    score,
+                                    entries[1..].join(", ")
+                                );
+                            } else {
+                                println!(
+                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}])",
+                                    start, best_name, score
+                                );
+                            }
+                            for entry in &entries {
+                                let entry_patches = graph::get_patches_temporal(
+                                    &graph_conn,
+                                    entry,
+                                    &ctx.namespaces,
+                                    &temporal,
+                                )
+                                .await?;
+                                for patch in entry_patches {
+                                    if !patches.iter().any(|p| {
+                                        p.name == patch.name && p.namespace == patch.namespace
+                                    }) {
+                                        patches.push(patch);
+                                    }
+                                }
+                                let entry_connected = graph::traverse_temporal(
+                                    &graph_conn,
+                                    entry,
+                                    depth,
+                                    &ctx.namespaces,
+                                    &temporal,
+                                    walk_limit,
+                                )
+                                .await?;
+                                for name in entry_connected {
+                                    if !connected.contains(&name) {
+                                        connected.push(name);
+                                    }
+                                }
+                            }
+                            connected.truncate(walk_limit as usize);
                         }
                     }
+                }
+
+                if patches.is_empty()
+                    && connected.is_empty()
+                    && let Some((name, score)) = ft_fallback
+                {
+                    println!("(fulltext-lowconf: '{start}' -> '{name}' [score: {score:.2}])");
+                    concept = name;
+                    patches = graph::get_patches_temporal(
+                        &graph_conn,
+                        &concept,
+                        &ctx.namespaces,
+                        &temporal,
+                    )
+                    .await?;
+                    connected = graph::traverse_temporal(
+                        &graph_conn,
+                        &concept,
+                        depth,
+                        &ctx.namespaces,
+                        &temporal,
+                        walk_limit,
+                    )
+                    .await?;
                 }
             }
 
