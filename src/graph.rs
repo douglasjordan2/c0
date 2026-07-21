@@ -3234,13 +3234,9 @@ pub async fn delete_session_turns(graph: &Graph, session_id: &str) -> Result<u64
              OPTIONAL MATCH (t)-[:HAS_REFLECTION]->(r:Reflection)
              OPTIONAL MATCH (t)-[:CALLED]->(tc:ToolCall)
              WITH t, collect(DISTINCT r) AS reflections, collect(DISTINCT tc) AS toolcalls
+             FOREACH (r IN reflections | DETACH DELETE r)
+             FOREACH (tc IN toolcalls | DETACH DELETE tc)
              DETACH DELETE t
-             WITH reflections, toolcalls
-             UNWIND reflections AS r
-             DETACH DELETE r
-             WITH toolcalls
-             UNWIND toolcalls AS tc
-             DETACH DELETE tc
              RETURN count(*) AS n",
             )
             .param("session_id", session_id),
