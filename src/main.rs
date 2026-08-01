@@ -802,6 +802,14 @@ fn extract_topic(prompt: &str, pattern: &str) -> String {
     }
 }
 
+fn should_use_semantic(query: &str) -> bool {
+    let token_count = query
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+        .filter(|t| !t.is_empty())
+        .count();
+    query.len() > 10 || query.contains(' ') || token_count > 1
+}
+
 fn get_session_id() -> Option<String> {
     std::env::var("C0_SESSION").ok().or_else(|| {
         dirs::home_dir()
@@ -1749,7 +1757,7 @@ async fn main() -> Result<()> {
             }
 
             if patches.is_empty() && connected.is_empty() {
-                let use_semantic = start.len() > 10 || start.contains(' ');
+                let use_semantic = should_use_semantic(&start);
                 if use_semantic {
                     let semantic_config = config::SemanticConfig::load();
                     if semantic_config.enabled
@@ -3622,4 +3630,36 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_semantic;
+
+    #[test]
+    fn short_hyphenated_identifiers_reach_semantic() {
+        assert!(should_use_semantic("voltr-ep3"));
+        assert!(should_use_semantic("voltr-ep6"));
+        assert!(should_use_semantic("c0_walk"));
+    }
+
+    #[test]
+    fn multi_word_and_long_queries_still_reach_semantic() {
+        assert!(should_use_semantic("seo aeo blog publishing"));
+        assert!(should_use_semantic("voltr-ep3-draft1-delivered"));
+        assert!(should_use_semantic("orchestration"));
+    }
+
+    #[test]
+    fn trivial_single_token_queries_stay_gated() {
+        assert!(!should_use_semantic("ep5"));
+        assert!(!should_use_semantic("hypr"));
+        assert!(!should_use_semantic(""));
+    }
+
+    #[test]
+    fn single_token_length_boundary_is_unchanged() {
+        assert!(!should_use_semantic("kubernetes"));
+        assert!(should_use_semantic("kubernetes1"));
+    }
 }
