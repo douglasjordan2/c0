@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::claude::{ExtractedConcept, LlmClient};
 use crate::config;
@@ -85,20 +85,65 @@ fn get_projects_dir() -> PathBuf {
         .join(".claude/projects")
 }
 
-fn derive_namespace(dir_name: &str) -> String {
-    let decoded = dir_name.replace('-', "/");
-    let path = PathBuf::from(&decoded);
-
-    let c0_config = path.join(".c0/config.toml");
-    if let Ok(content) = std::fs::read_to_string(&c0_config) {
-        if let Ok(config) = content.parse::<toml::Value>() {
-            if let Some(ns) = config.get("namespace").and_then(|v| v.as_str()) {
-                return ns.to_string();
-            }
+fn resolve_encoded_segments(base: &Path, segments: &[&str]) -> Option<PathBuf> {
+    if segments.is_empty() {
+        return Some(base.to_path_buf());
+    }
+    for take in (1..=segments.len()).rev() {
+        let component = segments[..take].join("-");
+        let candidate = base.join(&component);
+        if candidate.is_dir()
+            && let Some(resolved) = resolve_encoded_segments(&candidate, &segments[take..])
+        {
+            return Some(resolved);
         }
     }
+    None
+}
 
+fn decode_project_dir(dir_name: &str) -> Option<PathBuf> {
+    let trimmed = dir_name.strip_prefix('-')?;
+    if trimmed.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = trimmed.split('-').collect();
+    resolve_encoded_segments(Path::new("/"), &segments)
+}
+
+fn namespace_from_config_chain(path: &Path) -> Option<String> {
+    let mut dir = Some(path);
+    while let Some(current) = dir {
+        let config_file = current.join(".c0/config.toml");
+        if let Ok(content) = std::fs::read_to_string(&config_file)
+            && let Ok(config) = content.parse::<toml::Value>()
+            && let Some(ns) = config.get("namespace").and_then(|v| v.as_str())
+        {
+            return Some(ns.to_string());
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+fn derive_namespace(dir_name: &str) -> String {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+
+    let Some(path) = decode_project_dir(dir_name) else {
+        let fallback = PathBuf::from(dir_name.replace('-', "/"));
+        if fallback == home {
+            return "global".to_string();
+        }
+        return fallback
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("global")
+            .to_string();
+    };
+
+    if let Some(ns) = namespace_from_config_chain(&path) {
+        return ns;
+    }
+
     if path == home {
         return "global".to_string();
     }
@@ -2113,6 +2158,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod enrichment_tests {
     use super::*;
 
@@ -2155,6 +2201,70 @@ mod enrichment_tests {
         ];
         // Generous budget keeps every turn, in order.
         assert_eq!(select_salient_turn_indices(&turns, 10_000), vec![0, 1, 2]);
+    }
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "c0-derive-ns-{}-{}-{label}",
+            std::process::id(),
+            label.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn encode(path: &Path) -> String {
+        path.to_string_lossy().replace('/', "-")
+    }
+
+    #[test]
+    fn decodes_directories_containing_literal_hyphens() {
+        let root = scratch_dir("hyphen");
+        let project = root.join("solution-architect").join("reserve-padel");
+        std::fs::create_dir_all(&project).expect("create project");
+
+        let decoded = decode_project_dir(&encode(&project)).expect("resolves");
+        assert_eq!(decoded, project);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn walks_up_to_the_nearest_c0_config() {
+        let root = scratch_dir("walkup");
+        let project = root.join("reserve-padel");
+        let worktree = project.join("repo").join("main");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        std::fs::create_dir_all(project.join(".c0")).expect("create .c0");
+        std::fs::write(
+            project.join(".c0/config.toml"),
+            "namespace = \"reserve-padel\"\n",
+        )
+        .expect("write config");
+
+        assert_eq!(derive_namespace(&encode(&worktree)), "reserve-padel");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn falls_back_to_real_basename_without_a_config() {
+        let root = scratch_dir("basename");
+        let project = root.join("cocokind-vbt");
+        std::fs::create_dir_all(&project).expect("create project");
+
+        assert_eq!(derive_namespace(&encode(&project)), "cocokind-vbt");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unresolvable_paths_keep_legacy_behaviour() {
+        assert_eq!(
+            derive_namespace("-home-douglasjordan-does-not-exist-anywhere"),
+            "anywhere"
+        );
     }
 
     #[test]
