@@ -529,6 +529,11 @@ enum AuditCommands {
         dry_run: bool,
         #[arg(
             long,
+            help = "Adopt the duplicate's description onto the global concept when it is longer, and re-embed"
+        )]
+        adopt_descriptions: bool,
+        #[arg(
+            long,
             help = "Restore concepts merged by a run; optionally pass a run-id (default: most recent)",
             num_args = 0..=1,
             default_missing_value = ""
@@ -3401,6 +3406,7 @@ async fn main() -> Result<()> {
                 threshold,
                 namespace,
                 dry_run,
+                adopt_descriptions,
                 rollback,
                 json,
             } => {
@@ -3408,8 +3414,26 @@ async fn main() -> Result<()> {
                     let run = if run.is_empty() { None } else { Some(run) };
                     audit::dedupe_rollback(&graph_conn, run.as_deref(), json).await?;
                 } else {
-                    audit::dedupe(&graph_conn, threshold, namespace.as_deref(), dry_run, json)
-                        .await?;
+                    let sem_config = config::SemanticConfig::load();
+                    let client = if adopt_descriptions {
+                        embeddings::OllamaClient::from_config(&sem_config)
+                    } else {
+                        None
+                    };
+                    if adopt_descriptions && client.is_none() {
+                        anyhow::bail!(
+                            "--adopt-descriptions needs Ollama, which is not configured or reachable"
+                        );
+                    }
+                    audit::dedupe(
+                        &graph_conn,
+                        threshold,
+                        namespace.as_deref(),
+                        dry_run,
+                        client.as_ref(),
+                        json,
+                    )
+                    .await?;
                 }
             }
             AuditCommands::Enrich {

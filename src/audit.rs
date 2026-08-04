@@ -1043,7 +1043,12 @@ async fn propose_merges(
     Ok((merge, hold))
 }
 
-async fn apply_merge(graph: &Graph, m: &DedupeMerge, run_id: &str) -> Result<()> {
+async fn apply_merge(
+    graph: &Graph,
+    m: &DedupeMerge,
+    run_id: &str,
+    adopted: Option<(&str, Vec<f32>)>,
+) -> Result<()> {
     let q = query(
         r"
         MATCH (d:Concept {name: $name, namespace: $dup_ns})
@@ -1058,7 +1063,49 @@ async fn apply_merge(graph: &Graph, m: &DedupeMerge, run_id: &str) -> Result<()>
     .param("dup_ns", m.duplicate_namespace.clone())
     .param("run", run_id.to_string());
     graph.execute(q).await?.next().await?;
+
+    if let Some((description, embedding)) = adopted {
+        let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
+        let q = query(
+            r"
+            MATCH (c:Concept {name: $name, namespace: 'global'})
+            WHERE c.merge_prev_description IS NULL
+            SET c.merge_prev_description = c.description,
+                c.merge_desc_run = $run,
+                c.description = $description,
+                c.embedding = $embedding,
+                c.updated_at = datetime()
+            RETURN c.name AS name
+            ",
+        )
+        .param("name", m.name.clone())
+        .param("run", run_id.to_string())
+        .param("description", description.to_string())
+        .param("embedding", embedding_vec);
+        graph.execute(q).await?.next().await?;
+    }
     Ok(())
+}
+
+async fn better_description(graph: &Graph, m: &DedupeMerge) -> Result<Option<String>> {
+    let q = query(
+        r"
+        MATCH (d:Concept {name: $name, namespace: $dup_ns})
+        MATCH (c:Concept {name: $name, namespace: 'global'})
+        RETURN coalesce(d.description, '') AS dup, coalesce(c.description, '') AS canon
+        ",
+    )
+    .param("name", m.name.clone())
+    .param("dup_ns", m.duplicate_namespace.clone());
+    let mut result = graph.execute(q).await?;
+    match result.next().await? {
+        Some(row) => {
+            let dup: String = row.get("dup").unwrap_or_default();
+            let canon: String = row.get("canon").unwrap_or_default();
+            Ok((dup.len() > canon.len()).then_some(dup))
+        }
+        None => Ok(None),
+    }
 }
 
 pub async fn dedupe(
@@ -1066,6 +1113,7 @@ pub async fn dedupe(
     threshold: f32,
     namespace: Option<&str>,
     dry_run: bool,
+    adopt: Option<&crate::embeddings::OllamaClient>,
     json: bool,
 ) -> Result<()> {
     let run_id = format!(
@@ -1075,9 +1123,21 @@ pub async fn dedupe(
     );
     let (merges, held) = propose_merges(graph, threshold, namespace).await?;
 
+    let mut adopted_count = 0usize;
     if !dry_run {
         for m in &merges {
-            apply_merge(graph, m, &run_id).await?;
+            let mut adopted = None;
+            if let Some(client) = adopt
+                && let Some(better) = better_description(graph, m).await?
+                && let Ok(embedding) = client.embed(&better).await
+            {
+                adopted = Some((better, embedding));
+            }
+            let adopted_ref = adopted.as_ref().map(|(d, e)| (d.as_str(), e.clone()));
+            if adopted_ref.is_some() {
+                adopted_count += 1;
+            }
+            apply_merge(graph, m, &run_id, adopted_ref).await?;
         }
     }
 
@@ -1123,6 +1183,9 @@ pub async fn dedupe(
         println!("Re-run without --dry-run to apply.");
     } else {
         println!("Merged {} concept(s), run-id: {run_id}", merges.len());
+        if adopt.is_some() {
+            println!("Adopted {adopted_count} richer description(s) onto the global concept.");
+        }
         println!("Rollback: c0 audit dedupe --rollback {run_id}");
     }
     Ok(())
@@ -1152,6 +1215,18 @@ pub async fn dedupe_rollback(graph: &Graph, run: Option<&str>, json: bool) -> Re
             }
         }
     };
+
+    let q = query(
+        r"
+        MATCH (c:Concept {merge_desc_run: $run})
+        SET c.description = c.merge_prev_description,
+            c.merge_prev_description = null,
+            c.merge_desc_run = null
+        RETURN count(c) AS n
+        ",
+    )
+    .param("run", run_id.clone());
+    graph.execute(q).await?.next().await?;
 
     let q = query(
         r"
