@@ -2136,6 +2136,8 @@ pub async fn search_concepts_semantic(
              YIELD node, score
              WHERE node.namespace IN $namespaces
                AND score >= $threshold
+               AND (node.invalid_at IS NULL OR node.invalid_at > datetime())
+               AND (node.expired_at IS NULL OR node.expired_at > datetime())
              RETURN node.name AS name, node.namespace AS namespace,
                     node.description AS description, score AS similarity
              ORDER BY score DESC",
@@ -2216,6 +2218,8 @@ pub async fn search_concepts_fulltext(
                 "CALL db.index.fulltext.queryNodes('concept_fulltext', $query, {limit: $limit})
              YIELD node, score
              WHERE node.namespace IN $namespaces
+               AND (node.invalid_at IS NULL OR node.invalid_at > datetime())
+               AND (node.expired_at IS NULL OR node.expired_at > datetime())
              RETURN node.name AS name, node.namespace AS namespace,
                     node.description AS description, score AS similarity
              ORDER BY score DESC",
