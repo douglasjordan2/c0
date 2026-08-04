@@ -515,6 +515,28 @@ enum AuditCommands {
         #[arg(long, help = "Output JSON format")]
         json: bool,
     },
+    /// Collapse duplicate concepts that shadow a global concept of the same name.
+    Dedupe {
+        #[arg(
+            long,
+            default_value = "0.70",
+            help = "Min raw cosine similarity against the global concept to auto-merge. Raw [-1,1], not Neo4j's normalised (1+cos)/2 score"
+        )]
+        threshold: f32,
+        #[arg(long, help = "Only consider duplicates in this namespace")]
+        namespace: Option<String>,
+        #[arg(long, help = "Show proposed merges without writing them")]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Restore concepts merged by a run; optionally pass a run-id (default: most recent)",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        rollback: Option<String>,
+        #[arg(long, help = "Output JSON format")]
+        json: bool,
+    },
     /// Connect orphaned concepts to their nearest semantic neighbours.
     Enrich {
         #[arg(long, help = "Namespace to enrich (defaults to current)")]
@@ -3374,6 +3396,21 @@ async fn main() -> Result<()> {
                     println!();
                 }
                 audit::namespaces(&graph_conn, &ctx.namespaces, false, json).await?;
+            }
+            AuditCommands::Dedupe {
+                threshold,
+                namespace,
+                dry_run,
+                rollback,
+                json,
+            } => {
+                if let Some(run) = rollback {
+                    let run = if run.is_empty() { None } else { Some(run) };
+                    audit::dedupe_rollback(&graph_conn, run.as_deref(), json).await?;
+                } else {
+                    audit::dedupe(&graph_conn, threshold, namespace.as_deref(), dry_run, json)
+                        .await?;
+                }
             }
             AuditCommands::Enrich {
                 namespace,

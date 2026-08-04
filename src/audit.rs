@@ -969,3 +969,241 @@ pub async fn namespaces(
 
     Ok(())
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DedupeMerge {
+    pub name: String,
+    pub duplicate_namespace: String,
+    pub canonical_namespace: String,
+    pub similarity: f32,
+    pub relationships_kept: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DedupeReport {
+    pub run_id: String,
+    pub dry_run: bool,
+    pub threshold: f32,
+    pub merged: Vec<DedupeMerge>,
+    pub held_back: Vec<DedupeMerge>,
+}
+
+async fn propose_merges(
+    graph: &Graph,
+    threshold: f32,
+    namespace: Option<&str>,
+) -> Result<(Vec<DedupeMerge>, Vec<DedupeMerge>)> {
+    let ns_clause = if namespace.is_some() {
+        " AND d.namespace = $namespace"
+    } else {
+        ""
+    };
+    let cypher = format!(
+        r"
+        MATCH (c:Concept {{namespace: 'global'}})
+        WHERE c.embedding IS NOT NULL AND c.expired_at IS NULL
+        MATCH (d:Concept)
+        WHERE d.name = c.name AND d.namespace <> 'global'
+          AND d.embedding IS NOT NULL AND d.expired_at IS NULL{ns_clause}
+        OPTIONAL MATCH (d)-[r]-()
+        RETURN d.name AS name, d.namespace AS dup_ns, c.namespace AS canon_ns,
+               c.embedding AS canon_emb, d.embedding AS dup_emb, count(r) AS rels
+        "
+    );
+    let mut q = query(&cypher);
+    if let Some(ns) = namespace {
+        q = q.param("namespace", ns.to_string());
+    }
+
+    let mut result = graph.execute(q).await?;
+    let (mut merge, mut hold) = (Vec::new(), Vec::new());
+    while let Some(row) = result.next().await? {
+        let canon_emb: Vec<f64> = row.get("canon_emb").unwrap_or_default();
+        let dup_emb: Vec<f64> = row.get("dup_emb").unwrap_or_default();
+        if canon_emb.is_empty() || dup_emb.is_empty() {
+            continue;
+        }
+        let a: Vec<f32> = canon_emb.iter().map(|&x| x as f32).collect();
+        let b: Vec<f32> = dup_emb.iter().map(|&x| x as f32).collect();
+        let entry = DedupeMerge {
+            name: row.get("name").unwrap_or_default(),
+            duplicate_namespace: row.get("dup_ns").unwrap_or_default(),
+            canonical_namespace: row.get("canon_ns").unwrap_or_default(),
+            similarity: cosine_similarity(&a, &b),
+            relationships_kept: row.get("rels").unwrap_or(0),
+        };
+        if entry.similarity >= threshold {
+            merge.push(entry);
+        } else {
+            hold.push(entry);
+        }
+    }
+    merge.sort_by(|x, y| y.similarity.total_cmp(&x.similarity));
+    hold.sort_by(|x, y| x.similarity.total_cmp(&y.similarity));
+    Ok((merge, hold))
+}
+
+async fn apply_merge(graph: &Graph, m: &DedupeMerge, run_id: &str) -> Result<()> {
+    let q = query(
+        r"
+        MATCH (d:Concept {name: $name, namespace: $dup_ns})
+        MATCH (c:Concept {name: $name, namespace: 'global'})
+        SET d.expired_at = datetime(), d.merged_into = c.namespace, d.merge_run = $run
+        MERGE (d)-[r:SAME_AS]->(c)
+        ON CREATE SET r.merge_run = $run
+        RETURN d.name AS name
+        ",
+    )
+    .param("name", m.name.clone())
+    .param("dup_ns", m.duplicate_namespace.clone())
+    .param("run", run_id.to_string());
+    graph.execute(q).await?.next().await?;
+    Ok(())
+}
+
+pub async fn dedupe(
+    graph: &Graph,
+    threshold: f32,
+    namespace: Option<&str>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let run_id = format!(
+        "dedupe-{}-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        std::process::id()
+    );
+    let (merges, held) = propose_merges(graph, threshold, namespace).await?;
+
+    if !dry_run {
+        for m in &merges {
+            apply_merge(graph, m, &run_id).await?;
+        }
+    }
+
+    let report = DedupeReport {
+        run_id: run_id.clone(),
+        dry_run,
+        threshold,
+        merged: merges.clone(),
+        held_back: held.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let title = if dry_run {
+        "C0 Duplicate Merge (dry run)"
+    } else {
+        "C0 Duplicate Merge"
+    };
+    println!("{title}");
+    println!("═══════════════════════════════════════");
+    let kept: i64 = merges.iter().map(|m| m.relationships_kept).sum();
+    println!(
+        "  {} duplicate(s) at or above {:.2} — {} relationship(s) preserved",
+        merges.len(),
+        threshold,
+        kept
+    );
+    println!(
+        "  {} held back below threshold (review by hand)",
+        held.len()
+    );
+    for m in held.iter().take(20) {
+        println!(
+            "    {:.2}  {} [{}]",
+            m.similarity, m.name, m.duplicate_namespace
+        );
+    }
+    println!("═══════════════════════════════════════");
+    if dry_run {
+        println!("Re-run without --dry-run to apply.");
+    } else {
+        println!("Merged {} concept(s), run-id: {run_id}", merges.len());
+        println!("Rollback: c0 audit dedupe --rollback {run_id}");
+    }
+    Ok(())
+}
+
+pub async fn dedupe_rollback(graph: &Graph, run: Option<&str>, json: bool) -> Result<()> {
+    let run_id = match run {
+        Some(r) if !r.is_empty() => r.to_string(),
+        _ => {
+            let q = query(
+                r"
+                MATCH (d:Concept) WHERE d.merge_run IS NOT NULL
+                RETURN d.merge_run AS run ORDER BY run DESC LIMIT 1
+                ",
+            );
+            let mut result = graph.execute(q).await?;
+            match result.next().await? {
+                Some(row) => row.get::<String>("run").unwrap_or_default(),
+                None => {
+                    if json {
+                        println!("{}", serde_json::json!({"restored": 0, "run_id": null}));
+                    } else {
+                        println!("No dedupe runs found.");
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let q = query(
+        r"
+        MATCH (d:Concept {merge_run: $run})
+        OPTIONAL MATCH (d)-[r:SAME_AS {merge_run: $run}]->()
+        DELETE r
+        SET d.expired_at = null, d.merged_into = null, d.merge_run = null
+        RETURN count(DISTINCT d) AS restored
+        ",
+    )
+    .param("run", run_id.clone());
+    let mut result = graph.execute(q).await?;
+    let restored: i64 = match result.next().await? {
+        Some(row) => row.get("restored").unwrap_or(0),
+        None => 0,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"restored": restored, "run_id": run_id})
+        );
+    } else {
+        println!("Restored {restored} concept(s) from run {run_id}.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod dedupe_tests {
+    use crate::embeddings::cosine_similarity;
+
+    fn normalised(raw: f32) -> f32 {
+        (1.0 + raw) / 2.0
+    }
+
+    #[test]
+    fn default_threshold_matches_neo4j_normalised_085() {
+        assert!((normalised(0.70) - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn identical_embeddings_score_one() {
+        let v = vec![0.3f32, 0.4, 0.5];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn orthogonal_embeddings_fall_below_default_threshold() {
+        let a = vec![1.0f32, 0.0];
+        let b = vec![0.0f32, 1.0];
+        assert!(cosine_similarity(&a, &b) < 0.70);
+    }
+}
