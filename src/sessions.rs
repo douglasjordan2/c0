@@ -10,6 +10,17 @@ use crate::graph::{
     SessionAggregates, ToolCallRecord, ToolResultBackfill, Turn,
 };
 
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SessionsState {
     dirs: HashMap<String, DirState>,
@@ -177,7 +188,7 @@ fn parse_first_prompt_from_jsonl(path: &PathBuf) -> Option<String> {
                 if let Some(msg) = obj.get("message") {
                     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
                         let truncated = if content.len() > 500 {
-                            format!("{}...", &content[..500])
+                            format!("{}...", safe_truncate(content, 500))
                         } else {
                             content.to_string()
                         };
@@ -188,7 +199,7 @@ fn parse_first_prompt_from_jsonl(path: &PathBuf) -> Option<String> {
                             if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                                 if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                     let truncated = if text.len() > 500 {
-                                        format!("{}...", &text[..500])
+                                        format!("{}...", safe_truncate(text, 500))
                                     } else {
                                         text.to_string()
                                     };
@@ -449,7 +460,7 @@ pub async fn list_sessions(namespaces: &[String], limit: usize) -> Result<()> {
             &s.created_at
         };
         let prompt = if s.first_prompt.len() > 40 {
-            format!("{}...", &s.first_prompt[..40])
+            format!("{}...", safe_truncate(&s.first_prompt, 40))
         } else {
             s.first_prompt.clone()
         };
@@ -459,7 +470,7 @@ pub async fn list_sessions(namespaces: &[String], limit: usize) -> Result<()> {
             .filter(|s| !s.is_empty())
             .unwrap_or(&prompt);
         let truncated = if display_name.len() > 50 {
-            format!("{}...", &display_name[..50])
+            format!("{}...", safe_truncate(display_name, 50))
         } else {
             display_name.to_string()
         };
@@ -508,7 +519,7 @@ pub async fn search_sessions(query: &str, namespaces: &[String], limit: usize) -
             .filter(|v| !v.is_empty())
             .unwrap_or(&s.first_prompt);
         let truncated = if display.len() > 50 {
-            format!("{}...", &display[..50])
+            format!("{}...", safe_truncate(display, 50))
         } else {
             display.to_string()
         };
@@ -545,7 +556,7 @@ pub async fn resume_session(query: &str, namespaces: &[String]) -> Result<()> {
             .filter(|v| !v.is_empty())
             .unwrap_or(&session.first_prompt);
         let truncated = if display.len() > 80 {
-            format!("{}...", &display[..80])
+            format!("{}...", safe_truncate(display, 80))
         } else {
             display.to_string()
         };
@@ -975,7 +986,7 @@ fn parse_jsonl_file(
 
         if !first_user_prompt_set && turn.role == "user" && !turn.text.is_empty() {
             let snippet = if turn.text.len() > 4096 {
-                &turn.text[..4096]
+                safe_truncate(&turn.text, 4096)
             } else {
                 &turn.text
             };
@@ -1335,7 +1346,7 @@ pub async fn search_turns(
         println!("Reflections matching: \"{query}\"\n");
         for (r, score) in &results {
             let snippet = if r.text.len() > 240 {
-                format!("{}...", &r.text[..240])
+                format!("{}...", safe_truncate(&r.text, 240))
             } else {
                 r.text.clone()
             };
@@ -1361,7 +1372,7 @@ pub async fn search_turns(
         println!("Turns matching: \"{query}\"\n");
         for (t, score) in &results {
             let snippet = if t.text.len() > 240 {
-                format!("{}...", &t.text[..240])
+                format!("{}...", safe_truncate(&t.text, 240))
             } else {
                 t.text.clone()
             };
@@ -1454,7 +1465,7 @@ pub async fn list_session_costs(namespaces: &[String], limit: usize) -> Result<(
             &first_prompt
         };
         let title = if title_src.len() > 50 {
-            format!("{}...", &title_src[..50])
+            format!("{}...", safe_truncate(title_src, 50))
         } else {
             title_src.to_string()
         };
