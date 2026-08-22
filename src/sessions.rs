@@ -2169,6 +2169,40 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 }
 
 #[cfg(test)]
+mod truncation_tests {
+    use super::safe_truncate;
+
+    #[test]
+    fn returns_input_unchanged_when_within_limit() {
+        assert_eq!(safe_truncate("hello", 5), "hello");
+        assert_eq!(safe_truncate("hi", 500), "hi");
+        assert_eq!(safe_truncate("", 10), "");
+    }
+
+    #[test]
+    fn cuts_ascii_at_the_exact_byte_offset() {
+        assert_eq!(safe_truncate("abcdefghij", 4), "abcd");
+    }
+
+    #[test]
+    fn walks_back_when_offset_lands_inside_a_multibyte_char() {
+        // "🙏" is 4 bytes (1..5); a cut at 2 must retreat to the boundary at 1.
+        assert_eq!(safe_truncate("a🙏b", 2), "a");
+        assert_eq!(safe_truncate("a🙏b", 4), "a");
+        assert_eq!(safe_truncate("a🙏b", 5), "a🙏");
+    }
+
+    #[test]
+    fn emoji_straddling_the_500_byte_prompt_cap_does_not_panic() {
+        // Regression for the c0 sessions index crash: byte 500 fell inside a
+        // multi-byte char of a session's first prompt (issue #65).
+        let prompt = format!("{}🙏 and more text", "x".repeat(497));
+        let cut = safe_truncate(&prompt, 500);
+        assert_eq!(cut, "x".repeat(497));
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod enrichment_tests {
     use super::*;
