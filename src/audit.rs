@@ -62,7 +62,7 @@ async fn find_age_stale(
         WHERE c.namespace IN $namespaces
           AND c.invalid_at IS NULL
           AND c.expired_at IS NULL
-        OPTIONAL MATCH (c)-[:HAS_PATCH]->(p:KnowledgePatch)
+        OPTIONAL MATCH (c)-[:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
         WHERE p.invalid_at IS NULL
         WITH c, max(p.valid_at) AS max_patch_valid
         WITH c, CASE
@@ -821,7 +821,7 @@ async fn get_namespace_stats(graph: &Graph, namespaces: &[String]) -> Result<Vec
         r"
         MATCH (c:Concept)
         WHERE c.namespace IN $namespaces
-        OPTIONAL MATCH (c)-[:HAS_PATCH]->(p:KnowledgePatch)
+        OPTIONAL MATCH (c)-[:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
         OPTIONAL MATCH (c)<-[in_rel]-()
         WITH c.namespace AS namespace,
              count(DISTINCT c) AS concepts,
