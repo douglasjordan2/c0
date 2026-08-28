@@ -447,6 +447,25 @@ fn validate_rel_type(rel_type: &str) -> Result<()> {
     Ok(())
 }
 
+/// Relationship types whose *target* node is a `KnowledgePatch` rather than a
+/// `Concept`. `relate` must MATCH the target with the right label, so these
+/// rel-types take the KnowledgePatch-target Cypher branch. Everything else is
+/// concept -> concept.
+///
+/// - `HAS_PATCH`:    concept -> patch (a concept owns a patch).
+/// - `DISCUSSED_IN`: concept -> patch (a concept was discussed in a transcript
+///   patch; created by extract indexing at `main.rs` ~3088).
+///
+/// Keep this list in sync with any new concept -> patch rel-types; a rel-type
+/// missing here silently matches `(b:Concept)`, finds nothing, and fails with
+/// "source and/or target not found".
+pub const PATCH_TARGET_RELS: &[&str] = &["HAS_PATCH", "DISCUSSED_IN"];
+
+/// True when `rel_type`'s target node is a `KnowledgePatch` (not a `Concept`).
+fn targets_patch(rel_type: &str) -> bool {
+    PATCH_TARGET_RELS.contains(&rel_type)
+}
+
 pub async fn relate(
     graph: &Graph,
     from: &str,
@@ -458,7 +477,7 @@ pub async fn relate(
 
     // Use MERGE, not CREATE: running the same `relate` twice (the normal
     // hook/script usage mode) must not accrete duplicate edges.
-    let cypher = if rel_type == "HAS_PATCH" {
+    let cypher = if targets_patch(rel_type) {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:KnowledgePatch {{name: $to}}) \
              WHERE a.namespace IN $namespaces AND (b.namespace IS NULL OR b.namespace IN $namespaces) \
@@ -485,7 +504,7 @@ pub async fn relate(
         None => 0,
     };
     if created == 0 {
-        let target_kind = if rel_type == "HAS_PATCH" {
+        let target_kind = if targets_patch(rel_type) {
             "patch"
         } else {
             "concept"
@@ -3996,6 +4015,43 @@ mod tests {
             assert!(
                 validate_rel_type(bad).is_err(),
                 "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    // Regression for the DISCUSSED_IN dead-end bug: `relate` selects its Cypher
+    // branch by whether the rel-type targets a KnowledgePatch. Both HAS_PATCH
+    // and DISCUSSED_IN are concept -> patch (see main.rs extract indexing), so
+    // both MUST take the KnowledgePatch-target branch. Before the fix,
+    // DISCUSSED_IN fell through to the (b:Concept) branch, matched nothing, and
+    // errored on every extracted concept.
+    #[test]
+    fn patch_targeting_rels_use_knowledgepatch_branch() {
+        assert!(targets_patch("HAS_PATCH"), "HAS_PATCH targets a patch");
+        assert!(
+            targets_patch("DISCUSSED_IN"),
+            "DISCUSSED_IN targets a patch (concept was discussed in a transcript patch)"
+        );
+    }
+
+    #[test]
+    fn concept_to_concept_rels_do_not_use_patch_branch() {
+        for rel in ["RELATED_TO", "USES", "DEPENDS_ON", "CORRECTS"] {
+            assert!(
+                !targets_patch(rel),
+                "{rel} is concept -> concept and must not take the patch branch"
+            );
+        }
+    }
+
+    // Guard against the two predicates drifting apart: every rel-type declared
+    // as patch-targeting must actually select the patch branch.
+    #[test]
+    fn patch_target_rels_list_matches_predicate() {
+        for rel in PATCH_TARGET_RELS {
+            assert!(
+                targets_patch(rel),
+                "{rel} is in PATCH_TARGET_RELS but targets_patch() returned false"
             );
         }
     }
