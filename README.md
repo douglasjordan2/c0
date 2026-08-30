@@ -335,7 +335,16 @@ If you use [Claude Code](https://claude.com/claude-code), an optional feature in
 cargo install --path . --features sessions
 ```
 
-This is the reference example of c0's **source-adapter** pattern — the same shape any "fill the graph from <source>" integration would take.
+This is the reference example of c0's **source-adapter** pattern — the same shape any "fill the graph from <source>" integration would take. See [Writing a source adapter](#writing-a-source-adapter) below.
+
+### Writing a source adapter
+
+c0 keeps a clean seam between *reading a transcript* and *writing it to the graph*, so new harnesses (Cursor, Aider, Hermes, your own tool) can be added without touching the storage layer. The contract lives in `src/sessions.rs` and has exactly two halves:
+
+1. **Parse** your source into a `ParsedSession` (a normalized session plus its `ParsedTurn`s). `parse_jsonl_file` — the Claude Code JSONL reader — is the reference implementation to copy. This step does no graph I/O; it just maps your transcript format onto the shared model.
+2. **Write** it by handing that `ParsedSession` to `write_parsed_session`, which owns everything downstream: embeddings, node/edge creation, turn dedup, and aggregate rollups. Adapters never talk to Neo4j directly.
+
+So "add a harness" reduces to "write another `parse_*_session` that produces a `ParsedSession`, then call `write_parsed_session`." Both items carry `///` docs spelling out the contract. Out-of-tree adapters (c0 is a binary crate) can vendor or fork this seam; keeping the boundary stable is what makes them cheap to maintain.
 
 ## The reflection loop — c0's learning engine
 

@@ -621,6 +621,23 @@ pub struct ExtractStats {
     pub errors: u32,
 }
 
+/// The source-adapter contract, part 1 of 2: the normalized session model.
+///
+/// `ParsedSession` (+ its [`ParsedTurn`]s) is the harness-agnostic shape that
+/// sits between *parsing* a transcript and *writing* it to the graph. It is the
+/// seam c0 exposes for adding new session sources ("fill the graph from
+/// `<source>`"):
+///
+/// 1. Parse your source's transcript into a `ParsedSession` — see
+///    [`parse_jsonl_file`] (the Claude Code JSONL adapter) as the reference
+///    implementation.
+/// 2. Hand it to [`write_parsed_session`], which owns all graph writes,
+///    embedding, and aggregation — an adapter never touches Neo4j directly.
+///
+/// Everything below the parse boundary (embeddings, Cypher, dedup, salience) is
+/// shared, so an out-of-tree adapter only has to produce this struct. Fields are
+/// deliberately plain data; populate what your source provides and leave the
+/// rest at [`Default`].
 #[derive(Debug, Clone, Default)]
 struct ParsedSession {
     session_id: String,
@@ -637,6 +654,9 @@ struct ParsedSession {
     backfills: Vec<ToolResultBackfill>,
 }
 
+/// A single normalized turn within a [`ParsedSession`]. See `ParsedSession`
+/// for the source-adapter contract; an adapter fills the fields its source
+/// provides and leaves the rest at [`Default`].
 #[derive(Debug, Clone, Default)]
 struct ParsedTurn {
     turn_id: String,
@@ -768,6 +788,16 @@ fn extract_tool_result_text(content: &serde_json::Value) -> String {
     String::new()
 }
 
+/// Reference source adapter: parse a Claude Code JSONL transcript into a
+/// [`ParsedSession`].
+///
+/// This is the *parse* half of c0's source-adapter contract and the canonical
+/// example to copy when adding a new harness (Cursor, Aider, Hermes, ...): read
+/// your source's transcript, normalize it into a `ParsedSession`/[`ParsedTurn`]
+/// tree, and return it. It does **no** graph I/O — writing is
+/// [`write_parsed_session`]'s job. A new adapter is simply "another
+/// `parse_*_session` that produces a `ParsedSession`"; nothing downstream needs
+/// to know which source it came from.
 fn parse_jsonl_file(
     path: &PathBuf,
     namespace: &str,
@@ -1023,6 +1053,16 @@ async fn embed_text_opt(
     }
 }
 
+/// The *write* half of c0's source-adapter contract: persist a
+/// [`ParsedSession`] into the graph.
+///
+/// This is the single entry point every source adapter funnels into. Once your
+/// `parse_*_session` has produced a `ParsedSession` (see [`parse_jsonl_file`]
+/// for the reference Claude Code adapter), hand it here and this function owns
+/// the rest: embedding, node/edge creation, turn dedup, and aggregate rollups.
+/// Adapters never talk to Neo4j directly — keeping all graph writes behind this
+/// boundary is what lets new harnesses be added (and maintained out of tree)
+/// without touching the storage layer.
 async fn write_parsed_session(
     graph_conn: &neo4rs::Graph,
     parsed: ParsedSession,
