@@ -200,6 +200,20 @@ fn route_namespace(topic: Option<&str>, source: &str, known: &[String], allow_ne
     }
 }
 
+/// Record a namespace that `route_namespace` just minted or assigned into a
+/// running in-memory vocabulary so later calls in the same batch see it and
+/// reuse it instead of minting a near-duplicate. Case-insensitive dedup, no-op
+/// if `candidate` is already present.
+fn push_namespace_candidate(vocab: &mut Vec<String>, candidate: &str) {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return;
+    }
+    if !vocab.iter().any(|existing| existing.eq_ignore_ascii_case(candidate)) {
+        vocab.push(candidate.to_string());
+    }
+}
+
 fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
     std::fs::metadata(path)
         .ok()
@@ -1933,13 +1947,21 @@ async fn extract_concepts_full(
     let total = chunks.len();
     let mut merged: Vec<ExtractedConcept> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Grows as chunks are processed so a topic label proposed in an earlier
+    // chunk is visible to the classifier for later chunks in this same
+    // session, instead of every chunk seeing only the pre-run vocabulary.
+    let mut running_vocab: Vec<String> = known.map(<[String]>::to_vec).unwrap_or_default();
     for (i, chunk) in chunks.iter().enumerate() {
         if chunk.trim().is_empty() {
             continue;
         }
-        match extract_session_concepts(chunk, max_concepts, known).await {
+        let chunk_known = known.is_some().then_some(running_vocab.as_slice());
+        match extract_session_concepts(chunk, max_concepts, chunk_known).await {
             Ok(concepts) => {
                 for c in concepts {
+                    if let Some(topic) = c.topic.as_deref() {
+                        push_namespace_candidate(&mut running_vocab, topic);
+                    }
                     if seen.insert(c.name.clone()) {
                         merged.push(c);
                     }
@@ -2038,7 +2060,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         }
     }
 
-    let vocab = if extraction.per_topic_namespace {
+    let mut vocab = if extraction.per_topic_namespace {
         known_namespace_vocabulary(&graph_conn, &extraction).await
     } else {
         Vec::new()
@@ -2084,6 +2106,9 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         } else {
             namespace.to_string()
         };
+        if extraction.per_topic_namespace {
+            push_namespace_candidate(&mut vocab, &target_ns);
+        }
 
         let embedding = if let Some(ref client) = ollama {
             client
@@ -2200,17 +2225,17 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
     println!("Enriching {} session(s)...", session_ids.len());
 
-    let vocab = if extraction.per_topic_namespace {
+    let mut vocab = if extraction.per_topic_namespace {
         known_namespace_vocabulary(&graph_conn, &extraction).await
     } else {
         Vec::new()
     };
-    let known = extraction.per_topic_namespace.then_some(vocab.as_slice());
 
     let mut total = EnrichStats::default();
 
     for (sid, ns) in &session_ids {
         let short = &sid[..8.min(sid.len())];
+        let known = extraction.per_topic_namespace.then_some(vocab.as_slice());
         let (concepts, text_len) = match extract_concepts_for_session(
             &graph_conn,
             sid,
@@ -2245,6 +2270,9 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
             } else {
                 ns.clone()
             };
+            if extraction.per_topic_namespace {
+                push_namespace_candidate(&mut vocab, &target_ns);
+            }
 
             let embedding = if let Some(ref client) = ollama {
                 client
@@ -2482,7 +2510,7 @@ mod enrichment_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod route_namespace_tests {
-    use super::route_namespace;
+    use super::{push_namespace_candidate, route_namespace};
 
     fn known() -> Vec<String> {
         vec![
@@ -2540,5 +2568,36 @@ mod route_namespace_tests {
         let empty: Vec<String> = Vec::new();
         assert_eq!(route_namespace(Some("issa"), "workspace", &empty, false), "workspace");
         assert_eq!(route_namespace(Some("issa"), "workspace", &empty, true), "issa");
+    }
+
+    #[test]
+    fn namespace_minted_for_first_item_is_seen_by_second_item_in_the_same_batch() {
+        // Simulates enrich_all's per-session loop: `vocab` starts from the
+        // pre-run graph vocabulary and must be refreshed in-place as each
+        // item mints a namespace, so later items in the same batch route
+        // into it instead of independently minting a near-duplicate.
+        let mut vocab = known();
+
+        let first_item_ns = route_namespace(Some("mlops"), "workspace-a", &vocab, true);
+        assert_eq!(first_item_ns, "mlops");
+        push_namespace_candidate(&mut vocab, &first_item_ns);
+        assert!(vocab.iter().any(|ns| ns.eq_ignore_ascii_case("mlops")));
+
+        // Second item's topic is a case-variant of the same freshly-minted
+        // namespace; it must snap onto "mlops" rather than minting "MLOps".
+        let second_item_ns = route_namespace(Some("MLOps"), "workspace-b", &vocab, true);
+        assert_eq!(second_item_ns, "mlops");
+    }
+
+    #[test]
+    fn push_namespace_candidate_dedupes_case_insensitively() {
+        let mut vocab = known();
+        push_namespace_candidate(&mut vocab, "c0");
+        push_namespace_candidate(&mut vocab, "C0");
+        push_namespace_candidate(&mut vocab, "  ");
+        assert_eq!(vocab, known());
+
+        push_namespace_candidate(&mut vocab, "mlops");
+        assert_eq!(vocab.last().map(String::as_str), Some("mlops"));
     }
 }
