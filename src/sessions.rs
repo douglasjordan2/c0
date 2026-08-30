@@ -1985,12 +1985,22 @@ async fn extract_concepts_for_session(
 /// `[extraction.routing]` `known_namespaces` allow-list, deduplicated
 /// (case-insensitive).
 ///
+/// `session_cwd` should be the session's own recorded working directory (see
+/// `Session.cwd` in graph.rs), so the ancestry walk is anchored on the
+/// project the session actually belongs to rather than the invoking
+/// process's cwd — batch enrichment and `--session <id>` calls may run from
+/// an unrelated directory. Pass `None` when the session has no recorded cwd.
+///
 /// This is deliberately NOT sourced from the whole graph: offering a peer
 /// project's namespace as vocab is exactly what let a drifting session route a
 /// concept into another project. Ancestry + allow-list is the only set the
 /// classifier ever sees, and [`route_namespace`] is constrained to the same
 /// set, so cross-project writes are impossible by construction.
-fn known_namespace_vocabulary(namespace: &str, routing: &config::RoutingConfig) -> Vec<String> {
+fn known_namespace_vocabulary(
+    namespace: &str,
+    session_cwd: Option<&Path>,
+    routing: &config::RoutingConfig,
+) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut vocab: Vec<String> = Vec::new();
     let mut push = |ns: &str| {
@@ -1999,7 +2009,7 @@ fn known_namespace_vocabulary(namespace: &str, routing: &config::RoutingConfig) 
             vocab.push(ns.to_string());
         }
     };
-    for ns in config::resolve_namespaces(namespace) {
+    for ns in config::resolve_namespaces(namespace, session_cwd) {
         push(&ns);
     }
     for ns in &routing.known_namespaces {
@@ -2016,17 +2026,19 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
 
     let mut stats = EnrichStats::default();
 
-    if !force {
-        let mut r = graph_conn
-            .execute(
-                neo4rs::query(
-                    "MATCH (s:Session {session_id: $id})
-                 RETURN s.enriched_at AS enriched_at, s.deep_indexed_at AS deep_at",
-                )
-                .param("id", session_id),
+    let mut r = graph_conn
+        .execute(
+            neo4rs::query(
+                "MATCH (s:Session {session_id: $id})
+                 RETURN s.enriched_at AS enriched_at, s.deep_indexed_at AS deep_at, s.cwd AS cwd",
             )
-            .await?;
-        if let Some(row) = r.next().await? {
+            .param("id", session_id),
+        )
+        .await?;
+    let mut session_cwd: Option<String> = None;
+    if let Some(row) = r.next().await? {
+        session_cwd = row.get("cwd").ok().filter(|c: &String| !c.is_empty());
+        if !force {
             let enriched: Option<String> = row.get("enriched_at").ok();
             let deep: Option<String> = row.get("deep_at").ok();
             if let (Some(e), Some(d)) = (enriched.as_ref(), deep.as_ref()) {
@@ -2040,7 +2052,11 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
     }
 
     let vocab = if extraction.routing.enabled {
-        known_namespace_vocabulary(namespace, &extraction.routing)
+        known_namespace_vocabulary(
+            namespace,
+            session_cwd.as_deref().map(Path::new),
+            &extraction.routing,
+        )
     } else {
         Vec::new()
     };
@@ -2150,7 +2166,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
                     "MATCH (s:Session)
                  WHERE s.deep_indexed_at IS NOT NULL
                    AND ($all_ns OR s.namespace IN $namespaces)
-                 RETURN s.session_id AS id, s.namespace AS ns
+                 RETURN s.session_id AS id, s.namespace AS ns, s.cwd AS cwd
                  ORDER BY s.deep_indexed_at DESC
                  LIMIT $limit",
                 )
@@ -2166,8 +2182,9 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
         while let Some(row) = result.next().await? {
             let id: String = row.get("id").unwrap_or_default();
             let ns: String = row.get("ns").unwrap_or_default();
+            let cwd: String = row.get("cwd").unwrap_or_default();
             if !id.is_empty() {
-                out.push((id, ns));
+                out.push((id, ns, cwd));
             }
         }
         out
@@ -2177,13 +2194,16 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
         for id in ids {
             let mut r = graph_conn
                 .execute(
-                    neo4rs::query("MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns")
-                        .param("id", id.as_str()),
+                    neo4rs::query(
+                        "MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns, s.cwd AS cwd",
+                    )
+                    .param("id", id.as_str()),
                 )
                 .await?;
             if let Some(row) = r.next().await? {
                 let ns: String = row.get("ns").unwrap_or_default();
-                out.push((id, ns));
+                let cwd: String = row.get("cwd").unwrap_or_default();
+                out.push((id, ns, cwd));
             }
         }
         out
@@ -2198,12 +2218,15 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
     let mut total = EnrichStats::default();
 
-    for (sid, ns) in &session_ids {
+    for (sid, ns, cwd) in &session_ids {
         let short = &sid[..8.min(sid.len())];
         // Vocab is scoped to THIS session's own namespace ancestry (+ allow-list),
-        // recomputed per session because a batch may span namespaces.
+        // recomputed per session because a batch may span namespaces. Anchored
+        // on the session's own recorded cwd, not the operator's, since a batch
+        // run's invoking process may sit in an unrelated directory.
+        let session_cwd = (!cwd.is_empty()).then(|| Path::new(cwd.as_str()));
         let vocab = if extraction.routing.enabled {
-            known_namespace_vocabulary(ns, &extraction.routing)
+            known_namespace_vocabulary(ns, session_cwd, &extraction.routing)
         } else {
             Vec::new()
         };
@@ -2594,11 +2617,60 @@ mod route_namespace_tests {
             enabled: true,
             known_namespaces: vec!["reference".to_string()],
         };
-        let vocab = known_namespace_vocabulary("reserve-padel-unresolved-xyz", &routing);
+        let vocab = known_namespace_vocabulary("reserve-padel-unresolved-xyz", None, &routing);
         assert!(vocab.iter().any(|n| n == "reserve-padel-unresolved-xyz"));
         assert!(vocab.iter().any(|n| n == "global"));
         assert!(vocab.iter().any(|n| n == "reference"));
         // A peer project the classifier might name is NOT offered as vocab.
         assert!(!vocab.iter().any(|n| n == "homeschool"));
+    }
+
+    #[test]
+    fn vocabulary_anchors_on_session_cwd_not_process_cwd() {
+        // A batch enrich run (or `--session <id>`) invokes this from wherever
+        // the operator happens to be, not from the session's own project
+        // directory. The ancestry walk must anchor on the session's recorded
+        // `cwd`, not `std::env::current_dir()`, or a parent namespace
+        // configured on disk silently drops out of the vocab.
+        let root = std::env::temp_dir().join(format!("c0-vocab-cwd-anchor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("reserve-padel-cwd-anchor-test");
+        std::fs::create_dir_all(project.join(".c0")).expect("create .c0");
+        std::fs::write(
+            project.join(".c0/config.toml"),
+            "namespace = \"reserve-padel-cwd-anchor-test\"\nparent_namespace = \"solution-architect-cwd-anchor-test\"\n",
+        )
+        .expect("write config");
+
+        let routing = RoutingConfig {
+            enabled: true,
+            known_namespaces: Vec::new(),
+        };
+
+        // Anchored on the session's own cwd: the parent configured on disk
+        // is found and joins the ancestry.
+        let vocab = known_namespace_vocabulary(
+            "reserve-padel-cwd-anchor-test",
+            Some(project.as_path()),
+            &routing,
+        );
+        assert!(
+            vocab
+                .iter()
+                .any(|n| n == "solution-architect-cwd-anchor-test")
+        );
+
+        // No session cwd (falls back to this test process's own cwd, which is
+        // nowhere near the scratch project): the `.c0` config is never found,
+        // so the parent is silently absent from the vocab.
+        let vocab_unanchored =
+            known_namespace_vocabulary("reserve-padel-cwd-anchor-test", None, &routing);
+        assert!(
+            !vocab_unanchored
+                .iter()
+                .any(|n| n == "solution-architect-cwd-anchor-test")
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

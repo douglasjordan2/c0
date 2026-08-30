@@ -507,13 +507,21 @@ impl NamespaceContext {
 /// the sole source of the controlled vocabulary for per-topic routing: a
 /// session may only write concepts into its own ancestry, never a peer project.
 ///
+/// `start_dir` seeds the upward `.c0` search and should be the directory that
+/// actually belongs to `namespace` (e.g. a session's recorded `cwd`), not
+/// necessarily the invoking process's own working directory — a batch job or
+/// `--session <id>` call may run from anywhere. Pass `None` to fall back to
+/// the current process's working directory.
+///
 /// Falls back to `[namespace, "global"]` when the namespace has no resolvable
 /// `.c0/config.toml` (e.g. a bare graph-only namespace) so routing still has the
 /// session's own bucket plus the shared global bucket to snap onto.
-pub fn resolve_namespaces(namespace: &str) -> Vec<String> {
+pub fn resolve_namespaces(namespace: &str, start_dir: Option<&Path>) -> Vec<String> {
     let mut namespaces = vec![namespace.to_string()];
 
-    let start_dir = std::env::current_dir().ok();
+    let start_dir = start_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
     if let Some((c0_dir, config)) = find_namespace_dir(namespace, start_dir.as_deref()) {
         let (_parent_dirs, parent_namespaces) =
             resolve_parent_chain(config.parent_namespace.as_deref(), &c0_dir);
