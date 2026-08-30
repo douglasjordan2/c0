@@ -477,12 +477,12 @@ impl LlmClient {
         })
     }
 
-    /// OpenRouter (OpenAI-compatible) chat-completions provider.
+    /// `OpenRouter` (OpenAI-compatible) chat-completions provider.
     ///
-    /// Mirrors `generate_anthropic_api` but talks to OpenRouter's OpenAI-format
+    /// Mirrors `generate_anthropic_api` but talks to `OpenRouter`'s OpenAI-format
     /// endpoint. Structured output uses function/tool-calling with a forced
     /// `structured_output` tool — the same reliable mechanism the Anthropic path
-    /// uses — because plain JSON-mode is inconsistent across OpenRouter models.
+    /// uses — because plain JSON-mode is inconsistent across `OpenRouter` models.
     /// Reads the key from `OPENROUTER_API_KEY` (independent of the Anthropic key).
     async fn generate_openrouter(
         &self,
@@ -972,8 +972,7 @@ fn provider_binary(provider: LlmProvider, binaries: &LlmBinaries) -> String {
         LlmProvider::Codex => binaries.codex.clone(),
         LlmProvider::Kilo => binaries.kilo.clone(),
         LlmProvider::Gemini => binaries.gemini.clone(),
-        LlmProvider::Ollama => String::new(),
-        LlmProvider::OpenRouter => String::new(),
+        LlmProvider::Ollama | LlmProvider::OpenRouter => String::new(),
     }
 }
 
@@ -1376,5 +1375,52 @@ mod tests {
         assert_eq!(client.model, "sonnet");
         assert_eq!(client.timeout_secs, 120);
         assert_eq!(client.max_budget_usd, config.max_budget_usd);
+    }
+
+    #[test]
+    fn test_openrouter_provider_parses_and_names_correctly() {
+        assert_eq!(LlmProvider::parse("openrouter"), LlmProvider::OpenRouter);
+        assert_eq!(LlmProvider::parse("OpenRouter"), LlmProvider::OpenRouter);
+
+        let binaries = LlmBinaries::default();
+        let client = LlmClient {
+            provider: LlmProvider::OpenRouter,
+            model: "openai/gpt-4o".to_string(),
+            timeout_secs: 60,
+            max_budget_usd: None,
+            binary: binaries.claude,
+            api_key: None,
+            ollama_host: None,
+        };
+        assert_eq!(client.provider_name(), "openrouter");
+    }
+
+    #[tokio::test]
+    async fn test_generate_openrouter_errors_without_api_key() {
+        if std::env::var("OPENROUTER_API_KEY").is_ok() {
+            // Can't safely unset env vars under `unsafe_code = "forbid"`; skip
+            // rather than assert against a key that's actually configured.
+            return;
+        }
+
+        let binaries = LlmBinaries::default();
+        let client = LlmClient {
+            provider: LlmProvider::OpenRouter,
+            model: "openai/gpt-4o".to_string(),
+            timeout_secs: 60,
+            max_budget_usd: None,
+            binary: binaries.claude,
+            api_key: None,
+            ollama_host: None,
+        };
+
+        let err = client
+            .generate_internal("hello", None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("OPENROUTER_API_KEY not set"),
+            "unexpected error message: {err}"
+        );
     }
 }

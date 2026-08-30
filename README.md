@@ -230,7 +230,7 @@ provider = "claude-cli"
 binaries = { claude = "claude" }   # path to your `claude` binary
 ```
 
-Either way, you can route **per task** — e.g. local extraction but Claude classification — with `classification_provider`, `extraction_provider`, `enrichment_provider`, and `concept_extraction_provider`. (`droid`, `codex`, and `gemini` are supported as providers too.)
+Either way, you can route **per task** — e.g. local extraction but Claude classification — with `classification_provider`, `extraction_provider`, `enrichment_provider`, and `concept_extraction_provider`. (`droid`, `codex`, `gemini`, and `openrouter` are supported as providers too.)
 
 > **Unattended setups:** the `claude-cli` provider only works where that CLI is **authenticated**. Interactive/desktop use is fine, but a headless `cron`/`systemd` daemon needs the CLI logged in *in that environment* or classification will fail — for always-on servers the API key (`provider = "claude"`) is the robust choice.
 
