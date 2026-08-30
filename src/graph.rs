@@ -265,26 +265,6 @@ pub async fn add_concept(
     Ok(())
 }
 
-/// Every distinct namespace currently present on a `Concept` node. Used to seed
-/// the controlled vocabulary for per-topic namespace routing so the classifier
-/// reuses existing namespaces instead of minting near-duplicates.
-pub async fn list_namespaces(graph: &Graph) -> Result<Vec<String>> {
-    let q = query(
-        "MATCH (c:Concept)
-         WHERE c.namespace IS NOT NULL AND c.namespace <> ''
-         RETURN DISTINCT c.namespace AS ns
-         ORDER BY ns",
-    );
-    let mut result = graph.execute(q).await?;
-    let mut namespaces = Vec::new();
-    while let Some(row) = result.next().await? {
-        if let Ok(ns) = row.get::<String>("ns") {
-            namespaces.push(ns);
-        }
-    }
-    Ok(namespaces)
-}
-
 pub async fn update_concept_embedding(
     graph: &Graph,
     name: &str,

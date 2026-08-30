@@ -165,53 +165,37 @@ fn derive_namespace(dir_name: &str) -> String {
         .to_string()
 }
 
-/// Decide the target namespace for a single extracted concept when per-topic
-/// routing is enabled.
+/// Choose the destination namespace for one extracted concept under per-topic
+/// routing.
 ///
 /// - `topic`: the classifier's sanitized topic label (already lowercase
 ///   kebab-case) or `None` when the model gave nothing usable.
 /// - `source`: the folder-derived namespace for the whole session/document —
 ///   the legacy destination and the fallback here.
-/// - `known`: the controlled vocabulary (existing graph namespaces + configured
-///   `known_namespaces`), lowercased.
-/// - `allow_new`: whether an unrecognized topic may mint a brand-new namespace.
+/// - `allowed`: the controlled set the concept may be routed into — the
+///   session's OWN namespace ancestry (self + parent chain + `global`) plus the
+///   configured `[extraction.routing] known_namespaces` allow-list. This set
+///   NEVER contains a peer project's namespace.
 ///
-/// Fallback rules that keep the change safe and sprawl-free:
+/// Ancestry-scoped routing (Doug's #74 review). A topic only means "which of
+/// *my* ancestor buckets does this belong in":
 /// - No topic → route to `source`.
-/// - Topic matches a known namespace (case-insensitive) → that namespace.
-/// - Topic is new and `allow_new` is true → the new topic namespace.
-/// - Topic is new and `allow_new` is false → route to `source`.
-fn route_namespace(topic: Option<&str>, source: &str, known: &[String], allow_new: bool) -> String {
+/// - Topic matches an allowed namespace (case-insensitive) → that namespace.
+/// - Topic matches nothing in `allowed` → route to `source`.
+///
+/// A topic naming a namespace outside `allowed` (e.g. a peer project the
+/// conversation drifted onto) can never route there — cross-project writes are
+/// impossible by construction, not merely discouraged by the prompt.
+fn route_namespace(topic: Option<&str>, source: &str, allowed: &[String]) -> String {
     let Some(topic) = topic.map(str::trim).filter(|t| !t.is_empty()) else {
         return source.to_string();
     };
 
-    if let Some(matched) = known.iter().find(|ns| ns.eq_ignore_ascii_case(topic)) {
-        return matched.clone();
-    }
-
-    if allow_new {
-        topic.to_string()
-    } else {
-        source.to_string()
-    }
-}
-
-/// Record a namespace that `route_namespace` just minted or assigned into a
-/// running in-memory vocabulary so later calls in the same batch see it and
-/// reuse it instead of minting a near-duplicate. Case-insensitive dedup, no-op
-/// if `candidate` is already present.
-fn push_namespace_candidate(vocab: &mut Vec<String>, candidate: &str) {
-    let candidate = candidate.trim();
-    if candidate.is_empty() {
-        return;
-    }
-    if !vocab
+    allowed
         .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(candidate))
-    {
-        vocab.push(candidate.to_string());
-    }
+        .find(|ns| ns.eq_ignore_ascii_case(topic))
+        .cloned()
+        .unwrap_or_else(|| source.to_string())
 }
 
 fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
@@ -1947,21 +1931,13 @@ async fn extract_concepts_full(
     let total = chunks.len();
     let mut merged: Vec<ExtractedConcept> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Grows as chunks are processed so a topic label proposed in an earlier
-    // chunk is visible to the classifier for later chunks in this same
-    // session, instead of every chunk seeing only the pre-run vocabulary.
-    let mut running_vocab: Vec<String> = known.map(<[String]>::to_vec).unwrap_or_default();
     for (i, chunk) in chunks.iter().enumerate() {
         if chunk.trim().is_empty() {
             continue;
         }
-        let chunk_known = known.is_some().then_some(running_vocab.as_slice());
-        match extract_session_concepts(chunk, max_concepts, chunk_known).await {
+        match extract_session_concepts(chunk, max_concepts, known).await {
             Ok(concepts) => {
                 for c in concepts {
-                    if let Some(topic) = c.topic.as_deref() {
-                        push_namespace_candidate(&mut running_vocab, topic);
-                    }
                     if seen.insert(c.name.clone()) {
                         merged.push(c);
                     }
@@ -2003,13 +1979,18 @@ async fn extract_concepts_for_session(
     }
 }
 
-/// Assemble the controlled namespace vocabulary for per-topic routing: the
-/// namespaces already present on `Concept` nodes plus any configured in
-/// `[extraction] known_namespaces`, deduplicated (case-insensitive).
-async fn known_namespace_vocabulary(
-    graph_conn: &neo4rs::Graph,
-    extraction: &config::ExtractionConfig,
-) -> Vec<String> {
+/// Assemble the controlled namespace vocabulary for per-topic routing, scoped
+/// to the session's OWN namespace ancestry via `config::resolve_namespaces`
+/// (self, parent chain, and `global`) UNION the configured
+/// `[extraction.routing]` `known_namespaces` allow-list, deduplicated
+/// (case-insensitive).
+///
+/// This is deliberately NOT sourced from the whole graph: offering a peer
+/// project's namespace as vocab is exactly what let a drifting session route a
+/// concept into another project. Ancestry + allow-list is the only set the
+/// classifier ever sees, and [`route_namespace`] is constrained to the same
+/// set, so cross-project writes are impossible by construction.
+fn known_namespace_vocabulary(namespace: &str, routing: &config::RoutingConfig) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut vocab: Vec<String> = Vec::new();
     let mut push = |ns: &str| {
@@ -2018,12 +1999,10 @@ async fn known_namespace_vocabulary(
             vocab.push(ns.to_string());
         }
     };
-    if let Ok(graph_namespaces) = graph::list_namespaces(graph_conn).await {
-        for ns in &graph_namespaces {
-            push(ns);
-        }
+    for ns in config::resolve_namespaces(namespace) {
+        push(&ns);
     }
-    for ns in &extraction.known_namespaces {
+    for ns in &routing.known_namespaces {
         push(ns);
     }
     vocab
@@ -2060,12 +2039,12 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         }
     }
 
-    let mut vocab = if extraction.per_topic_namespace {
-        known_namespace_vocabulary(&graph_conn, &extraction).await
+    let vocab = if extraction.routing.enabled {
+        known_namespace_vocabulary(namespace, &extraction.routing)
     } else {
         Vec::new()
     };
-    let known = extraction.per_topic_namespace.then_some(vocab.as_slice());
+    let known = extraction.routing.enabled.then_some(vocab.as_slice());
 
     let (concepts, text_len) = match extract_concepts_for_session(
         &graph_conn,
@@ -2096,19 +2075,11 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
     println!("  extracted {} concept(s)", concepts.len());
 
     for concept in &concepts {
-        let target_ns = if extraction.per_topic_namespace {
-            route_namespace(
-                concept.topic.as_deref(),
-                namespace,
-                &vocab,
-                extraction.allow_new_namespaces,
-            )
+        let target_ns = if extraction.routing.enabled {
+            route_namespace(concept.topic.as_deref(), namespace, &vocab)
         } else {
             namespace.to_string()
         };
-        if extraction.per_topic_namespace {
-            push_namespace_candidate(&mut vocab, &target_ns);
-        }
 
         let embedding = if let Some(ref client) = ollama {
             client
@@ -2146,7 +2117,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
             continue;
         }
         stats.concepts_linked += 1;
-        if extraction.per_topic_namespace && target_ns != namespace {
+        if extraction.routing.enabled && target_ns != namespace {
             println!(
                 "  • [{target_ns}] {} — {}",
                 concept.name, concept.description
@@ -2225,17 +2196,18 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
     println!("Enriching {} session(s)...", session_ids.len());
 
-    let mut vocab = if extraction.per_topic_namespace {
-        known_namespace_vocabulary(&graph_conn, &extraction).await
-    } else {
-        Vec::new()
-    };
-
     let mut total = EnrichStats::default();
 
     for (sid, ns) in &session_ids {
         let short = &sid[..8.min(sid.len())];
-        let known = extraction.per_topic_namespace.then_some(vocab.as_slice());
+        // Vocab is scoped to THIS session's own namespace ancestry (+ allow-list),
+        // recomputed per session because a batch may span namespaces.
+        let vocab = if extraction.routing.enabled {
+            known_namespace_vocabulary(ns, &extraction.routing)
+        } else {
+            Vec::new()
+        };
+        let known = extraction.routing.enabled.then_some(vocab.as_slice());
         let (concepts, text_len) = match extract_concepts_for_session(
             &graph_conn,
             sid,
@@ -2260,19 +2232,11 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
         let mut linked = 0u32;
         for concept in &concepts {
-            let target_ns = if extraction.per_topic_namespace {
-                route_namespace(
-                    concept.topic.as_deref(),
-                    ns,
-                    &vocab,
-                    extraction.allow_new_namespaces,
-                )
+            let target_ns = if extraction.routing.enabled {
+                route_namespace(concept.topic.as_deref(), ns, &vocab)
             } else {
                 ns.clone()
             };
-            if extraction.per_topic_namespace {
-                push_namespace_candidate(&mut vocab, &target_ns);
-            }
 
             let embedding = if let Some(ref client) = ollama {
                 client
@@ -2510,118 +2474,131 @@ mod enrichment_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod route_namespace_tests {
-    use super::{push_namespace_candidate, route_namespace};
+    use super::{known_namespace_vocabulary, route_namespace};
+    use crate::config::RoutingConfig;
 
-    fn known() -> Vec<String> {
+    /// The controlled set a session may route into: its own ancestry
+    /// (self `reserve-padel` + parent `solution-architect` + `global`) plus
+    /// one explicitly allow-listed cross-cutting bucket (`reference`). Never
+    /// contains a peer project namespace (`homeschool`, `some-other-client`).
+    fn allowed() -> Vec<String> {
         vec![
-            "c0".to_string(),
-            "issa".to_string(),
-            "homeschool".to_string(),
+            "reserve-padel".to_string(),
+            "solution-architect".to_string(),
+            "global".to_string(),
+            "reference".to_string(),
         ]
     }
 
     #[test]
     fn no_topic_falls_back_to_source() {
         assert_eq!(
-            route_namespace(None, "workspace", &known(), true),
-            "workspace"
+            route_namespace(None, "reserve-padel", &allowed()),
+            "reserve-padel"
         );
         assert_eq!(
-            route_namespace(Some(""), "workspace", &known(), true),
-            "workspace"
+            route_namespace(Some(""), "reserve-padel", &allowed()),
+            "reserve-padel"
         );
         assert_eq!(
-            route_namespace(Some("   "), "workspace", &known(), true),
-            "workspace"
+            route_namespace(Some("   "), "reserve-padel", &allowed()),
+            "reserve-padel"
         );
     }
 
     #[test]
-    fn topic_matching_known_namespace_routes_there() {
+    fn topic_naming_own_source_namespace_routes_there() {
         assert_eq!(
-            route_namespace(Some("issa"), "workspace", &known(), false),
-            "issa"
-        );
-        assert_eq!(
-            route_namespace(Some("c0"), "workspace", &known(), false),
-            "c0"
-        );
-        assert_eq!(
-            route_namespace(Some("homeschool"), "workspace", &known(), false),
-            "homeschool"
+            route_namespace(Some("reserve-padel"), "reserve-padel", &allowed()),
+            "reserve-padel"
         );
     }
 
     #[test]
-    fn known_match_is_case_insensitive_and_returns_canonical_form() {
+    fn topic_naming_a_parent_namespace_routes_there() {
+        // "which of MY ancestor buckets does this belong in": a concept the
+        // classifier tags with the parent namespace is written into the parent,
+        // which is already searched via the ancestry walk.
+        assert_eq!(
+            route_namespace(Some("solution-architect"), "reserve-padel", &allowed()),
+            "solution-architect"
+        );
+        assert_eq!(
+            route_namespace(Some("global"), "reserve-padel", &allowed()),
+            "global"
+        );
+    }
+
+    #[test]
+    fn topic_naming_an_allow_listed_bucket_routes_there() {
+        assert_eq!(
+            route_namespace(Some("reference"), "reserve-padel", &allowed()),
+            "reference"
+        );
+    }
+
+    #[test]
+    fn cross_project_write_is_impossible_by_construction() {
+        // THE core guarantee Doug required. A session in `reserve-padel` whose
+        // conversation drifted toward another client cannot route a concept into
+        // that peer project's namespace: a topic naming a NON-ancestor,
+        // non-allow-listed namespace falls back to the source, never the peer.
+        assert_eq!(
+            route_namespace(Some("homeschool"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+        assert_eq!(
+            route_namespace(Some("some-other-client"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+        // Even an arbitrary freshly-invented label cannot mint outside ancestry.
+        assert_eq!(
+            route_namespace(Some("brand-new-topic"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+    }
+
+    #[test]
+    fn allowed_match_is_case_insensitive_and_returns_canonical_form() {
         // The classifier may upper-case; we snap to the canonical stored form.
         assert_eq!(
-            route_namespace(Some("ISSA"), "workspace", &known(), false),
-            "issa"
+            route_namespace(Some("SOLUTION-ARCHITECT"), "reserve-padel", &allowed()),
+            "solution-architect"
         );
         assert_eq!(
-            route_namespace(Some("C0"), "workspace", &known(), true),
-            "c0"
+            route_namespace(Some("Reference"), "reserve-padel", &allowed()),
+            "reference"
         );
     }
 
     #[test]
-    fn new_topic_without_allow_new_falls_back_to_source() {
-        assert_eq!(
-            route_namespace(Some("brand-new-topic"), "workspace", &known(), false),
-            "workspace"
-        );
-    }
-
-    #[test]
-    fn new_topic_with_allow_new_mints_the_topic_namespace() {
-        assert_eq!(
-            route_namespace(Some("brand-new-topic"), "workspace", &known(), true),
-            "brand-new-topic"
-        );
-    }
-
-    #[test]
-    fn empty_vocabulary_defers_to_allow_new_flag() {
+    fn empty_allowed_set_always_falls_back_to_source() {
         let empty: Vec<String> = Vec::new();
         assert_eq!(
-            route_namespace(Some("issa"), "workspace", &empty, false),
-            "workspace"
+            route_namespace(Some("solution-architect"), "reserve-padel", &empty),
+            "reserve-padel"
         );
         assert_eq!(
-            route_namespace(Some("issa"), "workspace", &empty, true),
-            "issa"
+            route_namespace(Some("anything"), "reserve-padel", &empty),
+            "reserve-padel"
         );
     }
 
     #[test]
-    fn namespace_minted_for_first_item_is_seen_by_second_item_in_the_same_batch() {
-        // Simulates enrich_all's per-session loop: `vocab` starts from the
-        // pre-run graph vocabulary and must be refreshed in-place as each
-        // item mints a namespace, so later items in the same batch route
-        // into it instead of independently minting a near-duplicate.
-        let mut vocab = known();
-
-        let first_item_ns = route_namespace(Some("mlops"), "workspace-a", &vocab, true);
-        assert_eq!(first_item_ns, "mlops");
-        push_namespace_candidate(&mut vocab, &first_item_ns);
-        assert!(vocab.iter().any(|ns| ns.eq_ignore_ascii_case("mlops")));
-
-        // Second item's topic is a case-variant of the same freshly-minted
-        // namespace; it must snap onto "mlops" rather than minting "MLOps".
-        let second_item_ns = route_namespace(Some("MLOps"), "workspace-b", &vocab, true);
-        assert_eq!(second_item_ns, "mlops");
-    }
-
-    #[test]
-    fn push_namespace_candidate_dedupes_case_insensitively() {
-        let mut vocab = known();
-        push_namespace_candidate(&mut vocab, "c0");
-        push_namespace_candidate(&mut vocab, "C0");
-        push_namespace_candidate(&mut vocab, "  ");
-        assert_eq!(vocab, known());
-
-        push_namespace_candidate(&mut vocab, "mlops");
-        assert_eq!(vocab.last().map(String::as_str), Some("mlops"));
+    fn vocabulary_is_scoped_to_ancestry_plus_allowlist_never_peers() {
+        // `known_namespace_vocabulary` for a namespace not resolvable on disk
+        // falls back to [self, global]; the configured allow-list is merged in,
+        // but no arbitrary peer namespace ever appears (there is no whole-graph
+        // source anymore). This is the vocab half of the same guarantee.
+        let routing = RoutingConfig {
+            enabled: true,
+            known_namespaces: vec!["reference".to_string()],
+        };
+        let vocab = known_namespace_vocabulary("reserve-padel-unresolved-xyz", &routing);
+        assert!(vocab.iter().any(|n| n == "reserve-padel-unresolved-xyz"));
+        assert!(vocab.iter().any(|n| n == "global"));
+        assert!(vocab.iter().any(|n| n == "reference"));
+        // A peer project the classifier might name is NOT offered as vocab.
+        assert!(!vocab.iter().any(|n| n == "homeschool"));
     }
 }

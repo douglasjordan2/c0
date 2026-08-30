@@ -1209,15 +1209,16 @@ const SESSION_CONCEPT_SCHEMA: &str = r#"{"type":"object","properties":{"concepts
 
 /// Topic-aware variant of the session concept prompt. Used only when per-topic
 /// namespace routing is enabled: each concept also carries a `topic` label the
-/// router snaps onto the known-namespace vocabulary. `{known}` is replaced with
-/// the current controlled vocabulary so the model reuses existing namespaces.
+/// router snaps onto the allowed-namespace set. `{known}` is replaced with the
+/// session's own namespace ancestry (self + parents + global) plus the
+/// configured allow-list — the ONLY buckets a concept may be filed under.
 #[cfg(feature = "sessions")]
 const SESSION_CONCEPT_TOPIC_PROMPT: &str = r#"You are a knowledge curator. Extract distinct technology concepts, libraries, frameworks, patterns, methodologies, or domain ideas discussed in this Claude Code session.
 
 For each concept return:
 - name: lowercase kebab-case identifier (e.g. "rust-async", "neo4j-vector-index", "systemd-timer")
 - description: one-sentence summary of what was discussed about it (max 200 chars)
-- topic: the single best topic/project this concept belongs to, as a lowercase kebab-case label. PREFER an existing topic from this list when one fits: {known}. Only invent a new topic label when none of the existing ones apply.
+- topic: which of these buckets this concept belongs in, chosen from this list: {known}. Pick the single best-fitting bucket. If none of them clearly fit, use the first (the session's own namespace). Do NOT invent bucket names outside this list.
 
 Rules:
 - Extract up to {max} distinct concepts, ranked by relevance

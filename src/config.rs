@@ -41,21 +41,9 @@ pub struct ExtractionSettings {
     pub queue_unknown: bool,
     #[serde(default = "default_concept_extraction_timeout")]
     pub timeout_secs: u64,
-    /// Route each extracted concept to a topic-derived namespace instead of the
-    /// single folder-derived source namespace. Opt-in; default preserves the
-    /// legacy one-namespace-per-source behavior.
-    #[serde(default = "default_per_topic_namespace")]
-    pub per_topic_namespace: bool,
-    /// Optional controlled vocabulary of topic namespaces. Merged with the
-    /// namespaces already present in the graph to form the known set the router
-    /// snaps classifier labels onto.
+    /// Per-topic namespace routing knobs, grouped under `[extraction.routing]`.
     #[serde(default)]
-    pub known_namespaces: Vec<String>,
-    /// When per-topic routing is on and a classifier label matches no known
-    /// namespace, allow minting it as a new namespace. Default false keeps the
-    /// concept in the source namespace to avoid namespace sprawl.
-    #[serde(default = "default_allow_new_namespaces")]
-    pub allow_new_namespaces: bool,
+    pub routing: RoutingSettings,
 }
 
 impl Default for ExtractionSettings {
@@ -66,9 +54,35 @@ impl Default for ExtractionSettings {
             max_concepts: default_concept_extraction_max_concepts(),
             queue_unknown: default_concept_extraction_queue_unknown(),
             timeout_secs: default_concept_extraction_timeout(),
-            per_topic_namespace: default_per_topic_namespace(),
+            routing: RoutingSettings::default(),
+        }
+    }
+}
+
+/// `[extraction.routing]`: route each extracted concept into a topic-derived
+/// namespace drawn from the session's OWN namespace ancestry (self + parent
+/// chain + `global`) plus the explicit `known_namespaces` allow-list. Scoping
+/// to ancestry makes cross-project namespace writes impossible by construction.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RoutingSettings {
+    /// Turn per-topic routing on. Opt-in; default preserves the legacy
+    /// one-namespace-per-source behavior.
+    #[serde(default = "default_per_topic_namespace")]
+    pub enabled: bool,
+    /// Extra namespaces the router may write into beyond the session's own
+    /// ancestry — an explicit cross-cutting allow-list (e.g. a shared
+    /// `reference` bucket). A classifier label matching none of ancestry-or-
+    /// allow-list falls back to the source namespace; peer projects are never
+    /// reachable.
+    #[serde(default)]
+    pub known_namespaces: Vec<String>,
+}
+
+impl Default for RoutingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_per_topic_namespace(),
             known_namespaces: Vec::new(),
-            allow_new_namespaces: default_allow_new_namespaces(),
         }
     }
 }
@@ -94,10 +108,6 @@ fn default_concept_extraction_timeout() -> u64 {
 }
 
 fn default_per_topic_namespace() -> bool {
-    false
-}
-
-fn default_allow_new_namespaces() -> bool {
     false
 }
 
@@ -399,9 +409,16 @@ pub struct ExtractionConfig {
     pub max_concepts: usize,
     pub queue_unknown: bool,
     pub timeout_secs: u64,
-    pub per_topic_namespace: bool,
+    pub routing: RoutingConfig,
+}
+
+/// Runtime view of `[extraction.routing]`. Kept as its own struct so the
+/// routing knobs travel together and `ExtractionConfig` stays under clippy's
+/// `struct_excessive_bools` limit.
+#[derive(Debug, Clone)]
+pub struct RoutingConfig {
+    pub enabled: bool,
     pub known_namespaces: Vec<String>,
-    pub allow_new_namespaces: bool,
 }
 
 impl ExtractionConfig {
@@ -413,9 +430,10 @@ impl ExtractionConfig {
             max_concepts: global_config.extraction.max_concepts,
             queue_unknown: global_config.extraction.queue_unknown,
             timeout_secs: global_config.extraction.timeout_secs,
-            per_topic_namespace: global_config.extraction.per_topic_namespace,
-            known_namespaces: global_config.extraction.known_namespaces,
-            allow_new_namespaces: global_config.extraction.allow_new_namespaces,
+            routing: RoutingConfig {
+                enabled: global_config.extraction.routing.enabled,
+                known_namespaces: global_config.extraction.routing.known_namespaces,
+            },
         }
     }
 }
@@ -479,6 +497,35 @@ impl NamespaceContext {
             project_type: None,
         }
     }
+}
+
+/// Resolve a namespace *name* to its own ancestry: `[self, ...parents, global]`.
+///
+/// Unlike [`detect_namespace`], which reads the current working directory, this
+/// starts from a namespace label (e.g. the namespace a session was ingested
+/// under) and looks its `.c0` config up on disk to walk the parent chain. It is
+/// the sole source of the controlled vocabulary for per-topic routing: a
+/// session may only write concepts into its own ancestry, never a peer project.
+///
+/// Falls back to `[namespace, "global"]` when the namespace has no resolvable
+/// `.c0/config.toml` (e.g. a bare graph-only namespace) so routing still has the
+/// session's own bucket plus the shared global bucket to snap onto.
+pub fn resolve_namespaces(namespace: &str) -> Vec<String> {
+    let mut namespaces = vec![namespace.to_string()];
+
+    let start_dir = std::env::current_dir().ok();
+    if let Some((c0_dir, config)) = find_namespace_dir(namespace, start_dir.as_deref()) {
+        let (_parent_dirs, parent_namespaces) =
+            resolve_parent_chain(config.parent_namespace.as_deref(), &c0_dir);
+        namespaces.extend(parent_namespaces);
+        if config.inherit_global && !namespaces.iter().any(|n| n == "global") {
+            namespaces.push("global".to_string());
+        }
+    } else if !namespaces.iter().any(|n| n == "global") {
+        namespaces.push("global".to_string());
+    }
+
+    namespaces
 }
 
 pub fn detect_namespace() -> NamespaceContext {
