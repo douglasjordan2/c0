@@ -1158,19 +1158,44 @@ fn bash_call_for_hermes_tool(name: &str, input: &serde_json::Value) -> Option<Ba
     })
 }
 
-/// Resolve the graph identity for a Hermes session document: the document's
-/// own `session_id` field when present, falling back to the file stem.
-/// Used for both the incremental dedupe/skip state key and the Session/Turn
-/// MERGE key, so a file is never tracked under one identity and written to
-/// the graph under another.
-fn resolve_hermes_session_id(doc: &serde_json::Value, path: &Path) -> String {
-    ext_string(doc, "session_id")
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(std::string::ToString::to_string)
-        })
-        .unwrap_or_default()
+/// The graph identity for a Hermes session: the file stem, exactly like the
+/// sibling Claude Code path. Used for both the incremental dedupe/skip state
+/// key and the Session/Turn MERGE key.
+fn hermes_file_session_id(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+struct HermesFileDecision {
+    session_id: String,
+    current_mtime: Option<u64>,
+    skip: bool,
+}
+
+/// Resolve a Hermes session file's identity and whether it can be skipped,
+/// using only its path and stat() — no read/parse. The returned
+/// `session_id` is the same key `import_hermes_sessions` stores the mtime
+/// under after processing, so the skip-check lookup and the post-write
+/// store always agree.
+fn hermes_dedupe_decision(
+    dir_state: &TurnsDirState,
+    path: &PathBuf,
+    force: bool,
+) -> Option<HermesFileDecision> {
+    let session_id = hermes_file_session_id(path);
+    if session_id.is_empty() {
+        return None;
+    }
+    let current_mtime = file_mtime_ms(path);
+    let stored_mtime = dir_state.sessions.get(&session_id).copied();
+    let skip = !force && stored_mtime == current_mtime && current_mtime.is_some();
+    Some(HermesFileDecision {
+        session_id,
+        current_mtime,
+        skip,
+    })
 }
 
 /// Parse a Hermes webui session `.json` document into c0's `ParsedSession`.
@@ -1183,7 +1208,7 @@ fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
 /// Same as `parse_hermes_session`, but for a document already read and
 /// parsed by the caller (avoids a redundant read+parse of the same file).
 fn parse_hermes_session_doc(doc: &serde_json::Value, path: &Path) -> ParsedSession {
-    let session_id = resolve_hermes_session_id(doc, path);
+    let session_id = hermes_file_session_id(path);
 
     let workspace = ext_string(doc, "workspace")
         .or_else(|| ext_string(doc, "created_workspace"))
@@ -1656,22 +1681,15 @@ pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
     use std::io::Write;
     for f in &json_files {
         let path = f.path();
-        let filename_key = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        if filename_key.is_empty() {
+        let Some(decision) = hermes_dedupe_decision(dir_state, &path, force) else {
             continue;
-        }
-
-        let current_mtime = file_mtime_ms(&path);
-        let stored_mtime = dir_state.sessions.get(&filename_key).copied();
-
-        if !force && stored_mtime == current_mtime && current_mtime.is_some() {
+        };
+        if decision.skip {
             stats.sessions_skipped += 1;
             continue;
         }
+        let session_id = decision.session_id;
+        let current_mtime = decision.current_mtime;
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -1689,10 +1707,6 @@ pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
                 continue;
             }
         };
-        let session_id = resolve_hermes_session_id(&doc, &path);
-        if session_id.is_empty() {
-            continue;
-        }
 
         let parsed = parse_hermes_session_doc(&doc, &path);
         let namespace = parsed.namespace.clone();
@@ -2861,14 +2875,12 @@ mod enrichment_tests {
     }
 
     #[test]
-    fn hermes_dedupe_key_matches_graph_identity_on_id_collision() {
-        // Two distinct files (different filenames/mtimes) whose documents
-        // declare the SAME internal session_id. import_hermes_sessions()
-        // must key its incremental skip/dedupe state on the same value
-        // parse_hermes_session() uses as the Session/Turn MERGE key —
-        // otherwise a later file can silently wipe an earlier file's turns
-        // via graph::delete_session_turns() while the state cache still
-        // tracks them under separate, mismatched keys.
+    fn hermes_graph_identity_ignores_colliding_internal_session_id() {
+        // Two distinct files (different filenames) whose documents declare
+        // the SAME internal session_id. The graph identity must come from
+        // the filename, not the document body, so the two files can never
+        // MERGE onto the same Session/Turn node and wipe each other via
+        // graph::delete_session_turns().
         let root = scratch_dir("hermes-id-collision");
         let workspace = root.join("myproj");
         std::fs::create_dir_all(&workspace).expect("create workspace");
@@ -2878,24 +2890,47 @@ mod enrichment_tests {
         std::fs::rename(&path_a, &path_b).expect("rename to distinct filename");
         let path_a = write_hermes_fixture(&root, "dup_session", workspace.to_str().unwrap());
 
+        let identity_a = parse_hermes_session(&path_a).expect("parse a").session_id;
+        let identity_b = parse_hermes_session(&path_b).expect("parse b").session_id;
+
         assert_ne!(
-            path_a.file_stem().and_then(|s| s.to_str()),
-            path_b.file_stem().and_then(|s| s.to_str()),
-            "fixtures must have distinct filenames to exercise the collision"
+            identity_a, identity_b,
+            "files with distinct filenames must never resolve to the same graph identity, \
+             even when their document bodies share an internal session_id"
         );
+        assert_eq!(identity_a, hermes_file_session_id(&path_a));
+        assert_eq!(identity_b, hermes_file_session_id(&path_b));
+        assert_eq!(identity_b, "other_filename");
 
-        for path in [&path_a, &path_b] {
-            let content = std::fs::read_to_string(path).expect("read fixture");
-            let doc: serde_json::Value = serde_json::from_str(&content).expect("parse json");
-            let dedupe_key = resolve_hermes_session_id(&doc, path);
-            let graph_identity = parse_hermes_session(path).expect("parse").session_id;
+        std::fs::remove_dir_all(&root).ok();
+    }
 
-            assert_eq!(
-                dedupe_key, graph_identity,
-                "state key must match the graph MERGE identity for {path:?}"
-            );
-            assert_eq!(dedupe_key, "dup_session");
-        }
+    #[test]
+    fn hermes_dedupe_decision_skip_key_matches_store_key() {
+        let root = scratch_dir("hermes-dedupe-decision");
+        std::fs::create_dir_all(&root).expect("create root");
+        let path = write_hermes_fixture(&root, "sess_dedupe", root.to_str().unwrap());
+
+        let mut dir_state = TurnsDirState::default();
+
+        let first = hermes_dedupe_decision(&dir_state, &path, false).expect("resolves an id");
+        assert!(!first.skip, "a never-seen file must not be skipped");
+
+        // Mirror the loop's post-write store step exactly: insert under the
+        // decision's own session_id, the same field used for the lookup.
+        dir_state
+            .sessions
+            .insert(first.session_id.clone(), first.current_mtime.expect("mtime"));
+
+        let second = hermes_dedupe_decision(&dir_state, &path, false).expect("resolves an id");
+        assert_eq!(
+            first.session_id, second.session_id,
+            "the skip-check lookup key and the post-write store key must be identical"
+        );
+        assert!(second.skip, "an unchanged file must be skipped without reading/parsing it");
+
+        let forced = hermes_dedupe_decision(&dir_state, &path, true).expect("resolves an id");
+        assert!(!forced.skip, "force must bypass the skip even when mtime is unchanged");
 
         std::fs::remove_dir_all(&root).ok();
     }
