@@ -1158,18 +1158,27 @@ fn bash_call_for_hermes_tool(name: &str, input: &serde_json::Value) -> Option<Ba
     })
 }
 
-/// Parse a Hermes webui session `.json` document into c0's `ParsedSession`.
-fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
-    let content = std::fs::read_to_string(path)?;
-    let doc: serde_json::Value = serde_json::from_str(&content)?;
-
-    let session_id = ext_string(&doc, "session_id")
+/// Resolve the graph identity for a Hermes session document: the document's
+/// own `session_id` field when present, falling back to the file stem.
+/// Used for both the incremental dedupe/skip state key and the Session/Turn
+/// MERGE key, so a file is never tracked under one identity and written to
+/// the graph under another.
+fn resolve_hermes_session_id(doc: &serde_json::Value, path: &Path) -> String {
+    ext_string(doc, "session_id")
         .or_else(|| {
             path.file_stem()
                 .and_then(|s| s.to_str())
                 .map(std::string::ToString::to_string)
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Parse a Hermes webui session `.json` document into c0's `ParsedSession`.
+fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
+    let content = std::fs::read_to_string(path)?;
+    let doc: serde_json::Value = serde_json::from_str(&content)?;
+
+    let session_id = resolve_hermes_session_id(&doc, path);
 
     let workspace = ext_string(&doc, "workspace")
         .or_else(|| ext_string(&doc, "created_workspace"))
@@ -1642,11 +1651,24 @@ pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
     use std::io::Write;
     for f in &json_files {
         let path = f.path();
-        let session_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                stats.errors += 1;
+                eprintln!("  read error for {}: {e}", path.display());
+                continue;
+            }
+        };
+        let doc: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(e) => {
+                stats.errors += 1;
+                eprintln!("  parse error for {}: {e}", path.display());
+                continue;
+            }
+        };
+        let session_id = resolve_hermes_session_id(&doc, &path);
         if session_id.is_empty() {
             continue;
         }
@@ -2830,6 +2852,46 @@ mod enrichment_tests {
 
         // Tool result turn preserved as its own turn.
         assert_eq!(parsed.turns[2].role, "tool");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn hermes_dedupe_key_matches_graph_identity_on_id_collision() {
+        // Two distinct files (different filenames/mtimes) whose documents
+        // declare the SAME internal session_id. import_hermes_sessions()
+        // must key its incremental skip/dedupe state on the same value
+        // parse_hermes_session() uses as the Session/Turn MERGE key —
+        // otherwise a later file can silently wipe an earlier file's turns
+        // via graph::delete_session_turns() while the state cache still
+        // tracks them under separate, mismatched keys.
+        let root = scratch_dir("hermes-id-collision");
+        let workspace = root.join("myproj");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        let path_a = write_hermes_fixture(&root, "dup_session", workspace.to_str().unwrap());
+        let path_b = root.join("other_filename.json");
+        std::fs::rename(&path_a, &path_b).expect("rename to distinct filename");
+        let path_a = write_hermes_fixture(&root, "dup_session", workspace.to_str().unwrap());
+
+        assert_ne!(
+            path_a.file_stem().and_then(|s| s.to_str()),
+            path_b.file_stem().and_then(|s| s.to_str()),
+            "fixtures must have distinct filenames to exercise the collision"
+        );
+
+        for path in [&path_a, &path_b] {
+            let content = std::fs::read_to_string(path).expect("read fixture");
+            let doc: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+            let dedupe_key = resolve_hermes_session_id(&doc, path);
+            let graph_identity = parse_hermes_session(path).expect("parse").session_id;
+
+            assert_eq!(
+                dedupe_key, graph_identity,
+                "state key must match the graph MERGE identity for {path:?}"
+            );
+            assert_eq!(dedupe_key, "dup_session");
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }
