@@ -186,10 +186,7 @@ fn route_namespace(topic: Option<&str>, source: &str, known: &[String], allow_ne
         return source.to_string();
     };
 
-    if let Some(matched) = known
-        .iter()
-        .find(|ns| ns.eq_ignore_ascii_case(topic))
-    {
+    if let Some(matched) = known.iter().find(|ns| ns.eq_ignore_ascii_case(topic)) {
         return matched.clone();
     }
 
@@ -209,7 +206,10 @@ fn push_namespace_candidate(vocab: &mut Vec<String>, candidate: &str) {
     if candidate.is_empty() {
         return;
     }
-    if !vocab.iter().any(|existing| existing.eq_ignore_ascii_case(candidate)) {
+    if !vocab
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(candidate))
+    {
         vocab.push(candidate.to_string());
     }
 }
@@ -2522,8 +2522,14 @@ mod route_namespace_tests {
 
     #[test]
     fn no_topic_falls_back_to_source() {
-        assert_eq!(route_namespace(None, "workspace", &known(), true), "workspace");
-        assert_eq!(route_namespace(Some(""), "workspace", &known(), true), "workspace");
+        assert_eq!(
+            route_namespace(None, "workspace", &known(), true),
+            "workspace"
+        );
+        assert_eq!(
+            route_namespace(Some(""), "workspace", &known(), true),
+            "workspace"
+        );
         assert_eq!(
             route_namespace(Some("   "), "workspace", &known(), true),
             "workspace"
@@ -2532,8 +2538,14 @@ mod route_namespace_tests {
 
     #[test]
     fn topic_matching_known_namespace_routes_there() {
-        assert_eq!(route_namespace(Some("issa"), "workspace", &known(), false), "issa");
-        assert_eq!(route_namespace(Some("c0"), "workspace", &known(), false), "c0");
+        assert_eq!(
+            route_namespace(Some("issa"), "workspace", &known(), false),
+            "issa"
+        );
+        assert_eq!(
+            route_namespace(Some("c0"), "workspace", &known(), false),
+            "c0"
+        );
         assert_eq!(
             route_namespace(Some("homeschool"), "workspace", &known(), false),
             "homeschool"
@@ -2543,8 +2555,14 @@ mod route_namespace_tests {
     #[test]
     fn known_match_is_case_insensitive_and_returns_canonical_form() {
         // The classifier may upper-case; we snap to the canonical stored form.
-        assert_eq!(route_namespace(Some("ISSA"), "workspace", &known(), false), "issa");
-        assert_eq!(route_namespace(Some("C0"), "workspace", &known(), true), "c0");
+        assert_eq!(
+            route_namespace(Some("ISSA"), "workspace", &known(), false),
+            "issa"
+        );
+        assert_eq!(
+            route_namespace(Some("C0"), "workspace", &known(), true),
+            "c0"
+        );
     }
 
     #[test]
@@ -2566,8 +2584,14 @@ mod route_namespace_tests {
     #[test]
     fn empty_vocabulary_defers_to_allow_new_flag() {
         let empty: Vec<String> = Vec::new();
-        assert_eq!(route_namespace(Some("issa"), "workspace", &empty, false), "workspace");
-        assert_eq!(route_namespace(Some("issa"), "workspace", &empty, true), "issa");
+        assert_eq!(
+            route_namespace(Some("issa"), "workspace", &empty, false),
+            "workspace"
+        );
+        assert_eq!(
+            route_namespace(Some("issa"), "workspace", &empty, true),
+            "issa"
+        );
     }
 
     #[test]
