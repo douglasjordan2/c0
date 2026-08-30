@@ -136,6 +136,27 @@ fn namespace_from_config_chain(path: &Path) -> Option<String> {
     None
 }
 
+/// Derive a namespace from a real filesystem path: honour the nearest
+/// `.c0/config.toml` in the ancestry, map `$HOME` to `global`, else use the
+/// leaf folder name. Shared by the Claude Code and Hermes ingest paths so both
+/// harnesses resolve namespaces identically.
+fn namespace_for_path(path: &Path) -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+
+    if let Some(ns) = namespace_from_config_chain(path) {
+        return ns;
+    }
+
+    if path == home {
+        return "global".to_string();
+    }
+
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("global")
+        .to_string()
+}
+
 fn derive_namespace(dir_name: &str) -> String {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
 
@@ -151,18 +172,7 @@ fn derive_namespace(dir_name: &str) -> String {
             .to_string();
     };
 
-    if let Some(ns) = namespace_from_config_chain(&path) {
-        return ns;
-    }
-
-    if path == home {
-        return "global".to_string();
-    }
-
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("global")
-        .to_string()
+    namespace_for_path(&path)
 }
 
 fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
@@ -1006,6 +1016,283 @@ fn parse_jsonl_file(
     Ok(parsed)
 }
 
+// ---------------------------------------------------------------------------
+// Hermes agent session adapter
+//
+// Hermes (the harness behind Foreman/Fig/Rosie/Griot) persists each session as
+// a single JSON document under `~/.hermes/webui/sessions/<id>.json` with a rich
+// `messages` array plus a sibling `tool_calls` array. This adapter maps that
+// shape into c0's internal `ParsedSession`/`ParsedTurn` model so the existing
+// extract/enrich pipeline can ingest it unchanged. Claude Code ingestion is
+// untouched — this is a second, opt-in source (`c0 sessions import --from hermes`).
+// ---------------------------------------------------------------------------
+
+/// Default directory holding Hermes webui session stores.
+fn get_hermes_sessions_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".hermes/webui/sessions")
+}
+
+/// Convert a Hermes timestamp (epoch seconds as float, or RFC3339 string) into
+/// an RFC3339 string, matching the timestamp shape c0's Turn model expects.
+fn hermes_timestamp(v: Option<&serde_json::Value>) -> String {
+    let Some(v) = v else {
+        return String::new();
+    };
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    if let Some(secs) = v.as_f64() {
+        let nanos = ((secs.fract()) * 1_000_000_000.0).round() as u32;
+        if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs.trunc() as i64, nanos)
+        {
+            return dt.to_rfc3339();
+        }
+    }
+    String::new()
+}
+
+/// Pull the plain-text body out of a Hermes message `content` field, which is
+/// usually a string but may be an array of `{type:"text",text}` blocks.
+fn hermes_content_text(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(blocks)) => {
+            let mut out = String::new();
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(t) = block.get("text").and_then(|t| t.as_str())
+                {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(t);
+                }
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
+/// Build a `ParsedToolCall` from one entry of a Hermes assistant message's
+/// `tool_calls` array (OpenAI-style `{id, function:{name, arguments}}`).
+fn hermes_tool_call(tc: &serde_json::Value) -> Option<ParsedToolCall> {
+    let id = ext_string(tc, "id")
+        .or_else(|| ext_string(tc, "call_id"))
+        .unwrap_or_default();
+    if id.is_empty() {
+        return None;
+    }
+    let func = tc.get("function");
+    let name = func
+        .and_then(|f| ext_string(f, "name"))
+        .or_else(|| ext_string(tc, "name"))
+        .unwrap_or_default();
+
+    // `arguments` is a JSON string in the OpenAI convention; parse it so file
+    // touches / bash detection see structured input, and store canonical JSON.
+    let args_raw = func
+        .and_then(|f| f.get("arguments"))
+        .or_else(|| tc.get("arguments"));
+    let input: serde_json::Value = match args_raw {
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+        }
+        Some(other) => other.clone(),
+        None => serde_json::Value::Null,
+    };
+    let input_json = serde_json::to_string(&input).unwrap_or_default();
+    let file_touches = touches_for_hermes_tool(&name, &input);
+    let bash = bash_call_for_hermes_tool(&name, &input);
+
+    Some(ParsedToolCall {
+        tool_call_id: id,
+        name,
+        input_json,
+        file_touches,
+        bash,
+    })
+}
+
+/// Map a Hermes tool name + input to file touches. Hermes tool names differ
+/// from Claude Code's (`read_file`/`write_file`/`patch`/`search_files`), so we
+/// translate before delegating to the shared Claude-Code path.
+fn touches_for_hermes_tool(name: &str, input: &serde_json::Value) -> Vec<FileTouch> {
+    let action = match name {
+        "read_file" => "read",
+        "write_file" => "write",
+        "patch" => "edit",
+        "search_files" => "grep",
+        _ => return Vec::new(),
+    };
+    if let Some(p) = input.get("path").and_then(|v| v.as_str())
+        && !p.is_empty()
+    {
+        return vec![FileTouch {
+            path: p.to_string(),
+            action: action.to_string(),
+        }];
+    }
+    Vec::new()
+}
+
+/// Map a Hermes `terminal` tool call to a `BashCall`.
+fn bash_call_for_hermes_tool(name: &str, input: &serde_json::Value) -> Option<BashCall> {
+    if name != "terminal" {
+        return None;
+    }
+    let cmd = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if cmd.is_empty() {
+        return None;
+    }
+    Some(BashCall {
+        cmd,
+        description: None,
+    })
+}
+
+/// Parse a Hermes webui session `.json` document into c0's `ParsedSession`.
+fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
+    let content = std::fs::read_to_string(path)?;
+    let doc: serde_json::Value = serde_json::from_str(&content)?;
+
+    let session_id = ext_string(&doc, "session_id")
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_default();
+
+    let workspace = ext_string(&doc, "workspace")
+        .or_else(|| ext_string(&doc, "created_workspace"))
+        .unwrap_or_default();
+    let namespace = if workspace.is_empty() {
+        "global".to_string()
+    } else {
+        namespace_for_path(Path::new(&workspace))
+    };
+
+    let created_at = hermes_timestamp(doc.get("created_at"));
+    let ended_at = {
+        let t = hermes_timestamp(doc.get("updated_at"));
+        if t.is_empty() { None } else { Some(t) }
+    };
+
+    let doc_model = ext_string(&doc, "model");
+
+    let mut parsed = ParsedSession {
+        session_id: session_id.clone(),
+        namespace,
+        cwd: workspace.clone(),
+        git_branch: ext_string(&doc, "worktree_branch"),
+        is_sidechain_overall: false,
+        summary: ext_string(&doc, "title"),
+        slug: ext_string(&doc, "title"),
+        created_at,
+        ended_at,
+        ..ParsedSession::default()
+    };
+
+    let empty = Vec::new();
+    let messages = doc
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .unwrap_or(&empty);
+
+    let mut first_user_prompt_set = false;
+
+    for (idx, msg) in messages.iter().enumerate() {
+        let role = ext_string(msg, "role").unwrap_or_default();
+        if role.is_empty() {
+            continue;
+        }
+
+        let text = hermes_content_text(msg.get("content"));
+        let timestamp = hermes_timestamp(msg.get("timestamp"));
+        // Hermes messages carry no stable per-message id; synthesise a
+        // deterministic one so reply chains and re-imports stay stable.
+        let turn_id = format!("{session_id}#m{idx}");
+        let parent_turn_id = if idx == 0 {
+            None
+        } else {
+            Some(format!("{session_id}#m{}", idx - 1))
+        };
+
+        let mut turn = ParsedTurn {
+            turn_id: turn_id.clone(),
+            role: role.clone(),
+            text: text.clone(),
+            model: if role == "assistant" {
+                doc_model.clone()
+            } else {
+                None
+            },
+            timestamp,
+            parent_turn_id,
+            is_sidechain: false,
+            git_branch: parsed.git_branch.clone(),
+            cwd: if workspace.is_empty() {
+                None
+            } else {
+                Some(workspace.clone())
+            },
+            text_chars: text.len() as i64,
+            ..ParsedTurn::default()
+        };
+
+        // Reasoning → reflection. Hermes stores it as `reasoning_content`
+        // (preferred) or `reasoning`, both plain strings.
+        let reasoning = ext_string(msg, "reasoning_content").or_else(|| ext_string(msg, "reasoning"));
+        if let Some(r) = reasoning {
+            turn.thinking_chars += r.len() as i64;
+            turn.reflections.push(ParsedReflection {
+                reflection_id: format!("{turn_id}#r0"),
+                text: r,
+                signature: None,
+            });
+        }
+
+        // Assistant tool calls live in a per-message `tool_calls` array.
+        if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+            for tc in tcs {
+                if let Some(parsed_tc) = hermes_tool_call(tc) {
+                    turn.tool_use_count += 1;
+                    if !turn.tool_use_names.iter().any(|n| n == &parsed_tc.name) {
+                        turn.tool_use_names.push(parsed_tc.name.clone());
+                    }
+                    turn.toolcalls.push(parsed_tc);
+                }
+            }
+        }
+
+        if !first_user_prompt_set && role == "user" && !turn.text.is_empty() {
+            let snippet = if turn.text.len() > 4096 {
+                safe_truncate(&turn.text, 4096)
+            } else {
+                &turn.text
+            };
+            parsed.first_prompt = snippet.to_string();
+            first_user_prompt_set = true;
+        }
+
+        parsed.turns.push(turn);
+    }
+
+    if parsed.first_prompt.is_empty() {
+        parsed.first_prompt = "No prompt".to_string();
+    }
+
+    Ok(parsed)
+}
+
 async fn embed_text_opt(
     client: Option<&embeddings::OllamaClient>,
     text: &str,
@@ -1303,6 +1590,112 @@ pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractSt
     println!();
     println!(
         "Extracted {} session(s) ({} skipped, {} errors)",
+        stats.sessions_extracted, stats.sessions_skipped, stats.errors
+    );
+    println!(
+        "Emitted {} turn(s), {} reflection(s), {} toolcall(s), {} embedding call(s)",
+        stats.turns_emitted, stats.reflections_emitted, stats.toolcalls_emitted, stats.embed_calls
+    );
+    Ok(stats)
+}
+
+/// Import all Hermes agent sessions under `~/.hermes/webui/sessions/*.json`
+/// into the graph, reusing the same turn/reflection/toolcall pipeline as the
+/// Claude Code path. Incremental via the turns-state store, keyed under a
+/// synthetic `hermes` dir name so it never collides with Claude project dirs.
+pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
+    let sessions_dir = get_hermes_sessions_dir();
+    if !sessions_dir.exists() {
+        println!("No Hermes sessions directory found at {}", sessions_dir.display());
+        return Ok(ExtractStats::default());
+    }
+
+    let semantic_config = config::SemanticConfig::load();
+    let ollama = embeddings::OllamaClient::from_config(&semantic_config);
+    let graph_conn = graph::connect().await?;
+    graph::ensure_turn_indexes(&graph_conn).await?;
+
+    let mut state = load_turns_state();
+    let mut stats = ExtractStats::default();
+
+    // Session stores are top-level `*.json` files; skip the `_index.json`
+    // sidecar and the `_turn_journal` / `_run_journal` subdirectories.
+    let json_files: Vec<_> = std::fs::read_dir(&sessions_dir)?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| !n.starts_with('_'))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    println!(
+        "Scanning {} Hermes session store(s) under {}",
+        json_files.len(),
+        sessions_dir.display()
+    );
+
+    let dir_state = state.dirs.entry("hermes".to_string()).or_default();
+
+    use std::io::Write;
+    for f in &json_files {
+        let path = f.path();
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if session_id.is_empty() {
+            continue;
+        }
+
+        let current_mtime = file_mtime_ms(&path);
+        let stored_mtime = dir_state.sessions.get(&session_id).copied();
+
+        if !force && stored_mtime == current_mtime && current_mtime.is_some() {
+            stats.sessions_skipped += 1;
+            continue;
+        }
+
+        match parse_hermes_session(&path) {
+            Ok(parsed) => {
+                let namespace = parsed.namespace.clone();
+                let n_turns = parsed.turns.len();
+                let n_refl: usize = parsed.turns.iter().map(|t| t.reflections.len()).sum();
+                let n_tc: usize = parsed.turns.iter().map(|t| t.toolcalls.len()).sum();
+                print!(
+                    "  [{namespace}] {session_id} → {n_turns} turn(s), {n_refl} refl, {n_tc} tc ... "
+                );
+                std::io::stdout().flush().ok();
+
+                match write_parsed_session(&graph_conn, parsed, ollama.as_ref(), &mut stats).await {
+                    Ok(()) => {
+                        stats.sessions_extracted += 1;
+                        if let Some(m) = current_mtime {
+                            dir_state.sessions.insert(session_id, m);
+                        }
+                        println!("✓");
+                    }
+                    Err(e) => {
+                        stats.errors += 1;
+                        println!("✗ {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                stats.errors += 1;
+                eprintln!("  parse error for {session_id}: {e}");
+            }
+        }
+    }
+
+    save_turns_state(&state)?;
+
+    println!();
+    println!(
+        "Imported {} Hermes session(s) ({} skipped, {} errors)",
         stats.sessions_extracted, stats.sessions_skipped, stats.errors
     );
     println!(
@@ -2335,6 +2728,136 @@ mod enrichment_tests {
         let mut sorted = picked.clone();
         sorted.sort_unstable();
         assert_eq!(picked, sorted);
+    }
+
+    fn write_hermes_fixture(dir: &Path, session_id: &str, workspace: &str) -> PathBuf {
+        // A minimal Hermes webui session store (.json): rich `messages` +
+        // sibling `tool_calls`, matching the live on-disk shape.
+        let doc = serde_json::json!({
+            "session_id": session_id,
+            "title": "Fixture session",
+            "workspace": workspace,
+            "model": "claude-opus-4-8",
+            "model_provider": "anthropic",
+            "created_at": 1_787_082_467.6_f64,
+            "updated_at": 1_787_083_725.7_f64,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello there, please help",
+                    "timestamp": 1_787_082_467.6_f64
+                },
+                {
+                    "role": "assistant",
+                    "content": "On it — let me look.",
+                    "timestamp": 1_787_082_470.0_f64,
+                    "reasoning_content": "The user wants help; I'll run a command.",
+                    "tool_calls": [
+                        {
+                            "id": "toolu_abc123",
+                            "call_id": "toolu_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "terminal",
+                                "arguments": "{\"command\": \"ls -la /tmp\"}"
+                            }
+                        },
+                        {
+                            "id": "toolu_def456",
+                            "call_id": "toolu_def456",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\": \"/etc/hosts\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": "total 0\ndrwxr-xr-x ...",
+                    "timestamp": 1_787_082_471.0_f64,
+                    "tool_call_id": "toolu_abc123",
+                    "tool_name": "terminal"
+                }
+            ],
+            "tool_calls": []
+        });
+        let path = dir.join(format!("{session_id}.json"));
+        std::fs::write(&path, serde_json::to_string(&doc).expect("serialize")).expect("write");
+        path
+    }
+
+    #[test]
+    fn parses_hermes_session_into_turn_model() {
+        let root = scratch_dir("hermes-basic");
+        let workspace = root.join("myproj");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let path = write_hermes_fixture(&root, "sess_hermes_1", workspace.to_str().unwrap());
+
+        let parsed = parse_hermes_session(&path).expect("parse");
+
+        assert_eq!(parsed.session_id, "sess_hermes_1");
+        // Namespace derives from the Hermes workspace leaf folder.
+        assert_eq!(parsed.namespace, "myproj");
+        assert_eq!(parsed.cwd, workspace.to_str().unwrap());
+        assert_eq!(parsed.turns.len(), 3);
+
+        // First user prompt is captured.
+        assert_eq!(parsed.first_prompt, "hello there, please help");
+        assert_eq!(parsed.turns[0].role, "user");
+        assert_eq!(parsed.turns[0].text, "hello there, please help");
+        assert!(!parsed.turns[0].timestamp.is_empty());
+
+        // Assistant turn: model, reasoning->reflection, two tool calls.
+        let asst = &parsed.turns[1];
+        assert_eq!(asst.role, "assistant");
+        assert_eq!(asst.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(asst.reflections.len(), 1);
+        assert_eq!(asst.reflections[0].text, "The user wants help; I'll run a command.");
+        assert_eq!(asst.tool_use_count, 2);
+        assert_eq!(asst.toolcalls.len(), 2);
+        assert_eq!(asst.toolcalls[0].name, "terminal");
+        assert_eq!(
+            asst.toolcalls[0].bash.as_ref().map(|b| b.cmd.as_str()),
+            Some("ls -la /tmp")
+        );
+        // read_file registers a file touch.
+        assert_eq!(asst.toolcalls[1].name, "read_file");
+        assert_eq!(asst.toolcalls[1].file_touches.len(), 1);
+        assert_eq!(asst.toolcalls[1].file_touches[0].path, "/etc/hosts");
+        assert_eq!(asst.toolcalls[1].file_touches[0].action, "read");
+
+        // Tool result turn preserved as its own turn.
+        assert_eq!(parsed.turns[2].role, "tool");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn hermes_namespace_honours_c0_config_chain() {
+        let root = scratch_dir("hermes-ns");
+        let project = root.join("reserve-padel");
+        let workspace = project.join("repo").join("main");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(project.join(".c0")).expect("create .c0");
+        std::fs::write(
+            project.join(".c0/config.toml"),
+            "namespace = \"reserve-padel\"\n",
+        )
+        .expect("write config");
+
+        let path = write_hermes_fixture(&root, "sess_hermes_2", workspace.to_str().unwrap());
+        let parsed = parse_hermes_session(&path).expect("parse");
+        assert_eq!(parsed.namespace, "reserve-padel");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn namespace_for_path_maps_home_to_global() {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+        assert_eq!(namespace_for_path(&home), "global");
     }
 
     #[test]

@@ -428,6 +428,17 @@ enum SessionCommands {
         #[arg(long, help = "Skip turns from sidechain (subagent) sessions")]
         skip_sidechains: bool,
     },
+    /// Import sessions from another harness (e.g. Hermes agents) into c0.
+    Import {
+        #[arg(
+            long,
+            default_value = "hermes",
+            help = "Source harness to import from (currently: hermes)"
+        )]
+        from: String,
+        #[arg(long, help = "Re-import even if the session store hasn't changed")]
+        force: bool,
+    },
     Enrich {
         #[arg(
             long,
@@ -1036,6 +1047,19 @@ async fn main() -> Result<()> {
                     sessions::extract_session(&sid, force, skip_sidechains).await?;
                 } else {
                     sessions::extract_all(force, skip_sidechains).await?;
+                }
+                return Ok(());
+            }
+            Some(SessionCommands::Import { from, force }) => {
+                match from.as_str() {
+                    "hermes" => {
+                        sessions::import_hermes_sessions(force).await?;
+                    }
+                    other => {
+                        anyhow::bail!(
+                            "Unknown import source '{other}'. Supported sources: hermes"
+                        );
+                    }
                 }
                 return Ok(());
             }
