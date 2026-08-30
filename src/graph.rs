@@ -2086,13 +2086,12 @@ pub async fn move_concepts_by_prefix(
         .await?
         .map_or(0, |r| r.get("moved").unwrap_or(0));
 
-    let patches_moved =
-        if include_patches {
-            // HAS_PATCH (1:1) always follows its concept. A shared DISCUSSED_IN
-            // transcript patch moves only when no concept LEFT BEHIND in the old
-            // namespace still references it — i.e. no non-matching concept holds
-            // it (all prefix-matching concepts moved together above).
-            let mut patch_result = graph.execute(
+    let patches_moved = if include_patches {
+        // HAS_PATCH (1:1) always follows its concept. A shared DISCUSSED_IN
+        // transcript patch moves only when no concept LEFT BEHIND in the old
+        // namespace still references it — i.e. no non-matching concept holds
+        // it (all prefix-matching concepts moved together above).
+        let mut patch_result = graph.execute(
             query(
                 "MATCH (c:Concept {namespace: $to_namespace})-[r:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
                  WHERE c.name =~ $pattern AND p.namespace = $from_namespace
@@ -2108,13 +2107,13 @@ pub async fn move_concepts_by_prefix(
             .param("pattern", pattern.clone())
         ).await?;
 
-            patch_result
-                .next()
-                .await?
-                .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
-        } else {
-            0
-        };
+        patch_result
+            .next()
+            .await?
+            .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
+    } else {
+        0
+    };
 
     Ok((concepts_moved, patches_moved))
 }

@@ -758,7 +758,10 @@ mod tests {
         let ctx = NamespaceContext::for_namespace("work");
         assert_eq!(ctx.namespace, "work");
         // default projects inherit_global, so global is a fallback tail.
-        assert_eq!(ctx.namespaces, vec!["work".to_string(), "global".to_string()]);
+        assert_eq!(
+            ctx.namespaces,
+            vec!["work".to_string(), "global".to_string()]
+        );
     }
 
     #[test]

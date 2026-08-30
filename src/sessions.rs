@@ -126,7 +126,7 @@ fn namespace_from_config_chain(path: &Path) -> Option<String> {
     while let Some(current) = dir {
         let config_file = current.join(".c0/config.toml");
         if let Ok(content) = std::fs::read_to_string(&config_file)
-            && let Ok(config) = content.parse::<toml::Value>()
+            && let Ok(config) = toml::from_str::<toml::Value>(&content)
             && let Some(ns) = config.get("namespace").and_then(|v| v.as_str())
         {
             return Some(ns.to_string());
