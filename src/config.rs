@@ -41,6 +41,21 @@ pub struct ExtractionSettings {
     pub queue_unknown: bool,
     #[serde(default = "default_concept_extraction_timeout")]
     pub timeout_secs: u64,
+    /// Route each extracted concept to a topic-derived namespace instead of the
+    /// single folder-derived source namespace. Opt-in; default preserves the
+    /// legacy one-namespace-per-source behavior.
+    #[serde(default = "default_per_topic_namespace")]
+    pub per_topic_namespace: bool,
+    /// Optional controlled vocabulary of topic namespaces. Merged with the
+    /// namespaces already present in the graph to form the known set the router
+    /// snaps classifier labels onto.
+    #[serde(default)]
+    pub known_namespaces: Vec<String>,
+    /// When per-topic routing is on and a classifier label matches no known
+    /// namespace, allow minting it as a new namespace. Default false keeps the
+    /// concept in the source namespace to avoid namespace sprawl.
+    #[serde(default = "default_allow_new_namespaces")]
+    pub allow_new_namespaces: bool,
 }
 
 impl Default for ExtractionSettings {
@@ -51,6 +66,9 @@ impl Default for ExtractionSettings {
             max_concepts: default_concept_extraction_max_concepts(),
             queue_unknown: default_concept_extraction_queue_unknown(),
             timeout_secs: default_concept_extraction_timeout(),
+            per_topic_namespace: default_per_topic_namespace(),
+            known_namespaces: Vec::new(),
+            allow_new_namespaces: default_allow_new_namespaces(),
         }
     }
 }
@@ -73,6 +91,14 @@ fn default_concept_extraction_queue_unknown() -> bool {
 
 fn default_concept_extraction_timeout() -> u64 {
     90
+}
+
+fn default_per_topic_namespace() -> bool {
+    false
+}
+
+fn default_allow_new_namespaces() -> bool {
+    false
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -373,6 +399,9 @@ pub struct ExtractionConfig {
     pub max_concepts: usize,
     pub queue_unknown: bool,
     pub timeout_secs: u64,
+    pub per_topic_namespace: bool,
+    pub known_namespaces: Vec<String>,
+    pub allow_new_namespaces: bool,
 }
 
 impl ExtractionConfig {
@@ -384,6 +413,9 @@ impl ExtractionConfig {
             max_concepts: global_config.extraction.max_concepts,
             queue_unknown: global_config.extraction.queue_unknown,
             timeout_secs: global_config.extraction.timeout_secs,
+            per_topic_namespace: global_config.extraction.per_topic_namespace,
+            known_namespaces: global_config.extraction.known_namespaces,
+            allow_new_namespaces: global_config.extraction.allow_new_namespaces,
         }
     }
 }

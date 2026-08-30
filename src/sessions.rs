@@ -165,6 +165,41 @@ fn derive_namespace(dir_name: &str) -> String {
         .to_string()
 }
 
+/// Decide the target namespace for a single extracted concept when per-topic
+/// routing is enabled.
+///
+/// - `topic`: the classifier's sanitized topic label (already lowercase
+///   kebab-case) or `None` when the model gave nothing usable.
+/// - `source`: the folder-derived namespace for the whole session/document —
+///   the legacy destination and the fallback here.
+/// - `known`: the controlled vocabulary (existing graph namespaces + configured
+///   `known_namespaces`), lowercased.
+/// - `allow_new`: whether an unrecognized topic may mint a brand-new namespace.
+///
+/// Fallback rules that keep the change safe and sprawl-free:
+/// - No topic → route to `source`.
+/// - Topic matches a known namespace (case-insensitive) → that namespace.
+/// - Topic is new and `allow_new` is true → the new topic namespace.
+/// - Topic is new and `allow_new` is false → route to `source`.
+fn route_namespace(topic: Option<&str>, source: &str, known: &[String], allow_new: bool) -> String {
+    let Some(topic) = topic.map(str::trim).filter(|t| !t.is_empty()) else {
+        return source.to_string();
+    };
+
+    if let Some(matched) = known
+        .iter()
+        .find(|ns| ns.eq_ignore_ascii_case(topic))
+    {
+        return matched.clone();
+    }
+
+    if allow_new {
+        topic.to_string()
+    } else {
+        source.to_string()
+    }
+}
+
 fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
     std::fs::metadata(path)
         .ok()
@@ -1635,7 +1670,11 @@ fn parse_ollama_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>>
             } else {
                 desc
             };
-            Some(ExtractedConcept { name, description })
+            Some(ExtractedConcept {
+                name,
+                description,
+                topic: crate::claude::sanitize_topic_label(c.topic.as_deref()),
+            })
         })
         .take(max)
         .collect();
@@ -1645,6 +1684,7 @@ fn parse_ollama_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>>
 async fn extract_session_concepts(
     text: &str,
     max_concepts: usize,
+    known: Option<&[String]>,
 ) -> Result<Vec<ExtractedConcept>> {
     let semantic_config = config::SemanticConfig::load();
 
@@ -1657,6 +1697,8 @@ async fn extract_session_concepts(
     if client.provider_name() == "ollama" {
         let model_override = std::env::var("C0_ENRICH_MODEL").ok();
         let model = model_override.unwrap_or_else(|| client.model.clone());
+        // The Ollama enrichment path does not emit topic labels; per-topic
+        // routing degrades gracefully to source-namespace fallback here.
         return extract_session_concepts_ollama(
             &semantic_config.ollama_host,
             &model,
@@ -1666,7 +1708,14 @@ async fn extract_session_concepts(
         .await;
     }
 
-    client.extract_session_concepts(text, max_concepts).await
+    match known {
+        Some(vocab) => {
+            client
+                .extract_session_concepts_with_topics(text, max_concepts, vocab)
+                .await
+        }
+        None => client.extract_session_concepts(text, max_concepts).await,
+    }
 }
 
 /// Collapse a string to a single capped line for the signal block.
@@ -1849,6 +1898,7 @@ async fn extract_concepts_full(
     inputs: &EnrichmentInputs,
     budget: usize,
     max_concepts: usize,
+    known: Option<&[String]>,
 ) -> Result<Vec<ExtractedConcept>> {
     let signal = build_signal_block(
         &inputs.files,
@@ -1887,7 +1937,7 @@ async fn extract_concepts_full(
         if chunk.trim().is_empty() {
             continue;
         }
-        match extract_session_concepts(chunk, max_concepts).await {
+        match extract_session_concepts(chunk, max_concepts, known).await {
             Ok(concepts) => {
                 for c in concepts {
                     if seen.insert(c.name.clone()) {
@@ -1909,6 +1959,7 @@ async fn extract_concepts_for_session(
     session_id: &str,
     budget: usize,
     max_concepts: usize,
+    known: Option<&[String]>,
 ) -> Result<(Vec<ExtractedConcept>, usize)> {
     let inputs = graph::get_session_enrichment_inputs(graph_conn, session_id).await?;
     if inputs.turns.is_empty() && inputs.reflections.is_empty() {
@@ -1917,7 +1968,7 @@ async fn extract_concepts_for_session(
 
     if enrichment_full() {
         let total: usize = inputs.turns.iter().map(|t| t.text.len()).sum();
-        let concepts = extract_concepts_full(&inputs, budget, max_concepts).await?;
+        let concepts = extract_concepts_full(&inputs, budget, max_concepts, known).await?;
         Ok((concepts, total))
     } else {
         let text = build_enrichment_text(&inputs, budget);
@@ -1925,14 +1976,41 @@ async fn extract_concepts_for_session(
             return Ok((Vec::new(), 0));
         }
         let len = text.len();
-        let concepts = extract_session_concepts(&text, max_concepts).await?;
+        let concepts = extract_session_concepts(&text, max_concepts, known).await?;
         Ok((concepts, len))
     }
+}
+
+/// Assemble the controlled namespace vocabulary for per-topic routing: the
+/// namespaces already present on `Concept` nodes plus any configured in
+/// `[extraction] known_namespaces`, deduplicated (case-insensitive).
+async fn known_namespace_vocabulary(
+    graph_conn: &neo4rs::Graph,
+    extraction: &config::ExtractionConfig,
+) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut vocab: Vec<String> = Vec::new();
+    let mut push = |ns: &str| {
+        let key = ns.to_lowercase();
+        if !ns.is_empty() && seen.insert(key) {
+            vocab.push(ns.to_string());
+        }
+    };
+    if let Ok(graph_namespaces) = graph::list_namespaces(graph_conn).await {
+        for ns in &graph_namespaces {
+            push(ns);
+        }
+    }
+    for ns in &extraction.known_namespaces {
+        push(ns);
+    }
+    vocab
 }
 
 pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
+    let extraction = config::ExtractionConfig::load();
     let ollama = embeddings::OllamaClient::from_config(&semantic_config);
 
     let mut stats = EnrichStats::default();
@@ -1960,11 +2038,19 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         }
     }
 
+    let vocab = if extraction.per_topic_namespace {
+        known_namespace_vocabulary(&graph_conn, &extraction).await
+    } else {
+        Vec::new()
+    };
+    let known = extraction.per_topic_namespace.then_some(vocab.as_slice());
+
     let (concepts, text_len) = match extract_concepts_for_session(
         &graph_conn,
         session_id,
         enrichment_text_budget(),
         enrichment_max_concepts(),
+        known,
     )
     .await
     {
@@ -1988,6 +2074,17 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
     println!("  extracted {} concept(s)", concepts.len());
 
     for concept in &concepts {
+        let target_ns = if extraction.per_topic_namespace {
+            route_namespace(
+                concept.topic.as_deref(),
+                namespace,
+                &vocab,
+                extraction.allow_new_namespaces,
+            )
+        } else {
+            namespace.to_string()
+        };
+
         let embedding = if let Some(ref client) = ollama {
             client
                 .embed(&format!("{}: {}", concept.name, concept.description))
@@ -2000,7 +2097,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         if let Err(e) = graph::add_concept(
             &graph_conn,
             &concept.name,
-            namespace,
+            &target_ns,
             Some(&concept.description),
             Some("session-enrichment"),
             None,
@@ -2016,7 +2113,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         stats.concepts_created += 1;
 
         if let Err(e) =
-            graph::link_concept_to_session(&graph_conn, &concept.name, namespace, session_id, 1)
+            graph::link_concept_to_session(&graph_conn, &concept.name, &target_ns, session_id, 1)
                 .await
         {
             eprintln!("  failed to link concept {}: {e}", concept.name);
@@ -2024,7 +2121,14 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
             continue;
         }
         stats.concepts_linked += 1;
-        println!("  • {} — {}", concept.name, concept.description);
+        if extraction.per_topic_namespace && target_ns != namespace {
+            println!(
+                "  • [{target_ns}] {} — {}",
+                concept.name, concept.description
+            );
+        } else {
+            println!("  • {} — {}", concept.name, concept.description);
+        }
     }
 
     graph::mark_session_enriched(&graph_conn, session_id, stats.concepts_linked as i64).await?;
@@ -2040,6 +2144,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
 pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
+    let extraction = config::ExtractionConfig::load();
     let ollama = embeddings::OllamaClient::from_config(&semantic_config);
 
     let session_ids = if force {
@@ -2095,6 +2200,13 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
     println!("Enriching {} session(s)...", session_ids.len());
 
+    let vocab = if extraction.per_topic_namespace {
+        known_namespace_vocabulary(&graph_conn, &extraction).await
+    } else {
+        Vec::new()
+    };
+    let known = extraction.per_topic_namespace.then_some(vocab.as_slice());
+
     let mut total = EnrichStats::default();
 
     for (sid, ns) in &session_ids {
@@ -2104,6 +2216,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
             sid,
             enrichment_text_budget(),
             enrichment_max_concepts(),
+            known,
         )
         .await
         {
@@ -2122,6 +2235,17 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
         let mut linked = 0u32;
         for concept in &concepts {
+            let target_ns = if extraction.per_topic_namespace {
+                route_namespace(
+                    concept.topic.as_deref(),
+                    ns,
+                    &vocab,
+                    extraction.allow_new_namespaces,
+                )
+            } else {
+                ns.clone()
+            };
+
             let embedding = if let Some(ref client) = ollama {
                 client
                     .embed(&format!("{}: {}", concept.name, concept.description))
@@ -2133,7 +2257,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
             let added = graph::add_concept(
                 &graph_conn,
                 &concept.name,
-                ns,
+                &target_ns,
                 Some(&concept.description),
                 Some("session-enrichment"),
                 None,
@@ -2146,7 +2270,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
                 continue;
             }
             total.concepts_created += 1;
-            if graph::link_concept_to_session(&graph_conn, &concept.name, ns, sid, 1)
+            if graph::link_concept_to_session(&graph_conn, &concept.name, &target_ns, sid, 1)
                 .await
                 .is_ok()
             {
@@ -2352,5 +2476,69 @@ mod enrichment_tests {
         assert!(text.contains("src/sessions.rs"));
         assert!(text.contains("let's optimize"));
         assert!(text.len() <= 8_000);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod route_namespace_tests {
+    use super::route_namespace;
+
+    fn known() -> Vec<String> {
+        vec![
+            "c0".to_string(),
+            "issa".to_string(),
+            "homeschool".to_string(),
+        ]
+    }
+
+    #[test]
+    fn no_topic_falls_back_to_source() {
+        assert_eq!(route_namespace(None, "workspace", &known(), true), "workspace");
+        assert_eq!(route_namespace(Some(""), "workspace", &known(), true), "workspace");
+        assert_eq!(
+            route_namespace(Some("   "), "workspace", &known(), true),
+            "workspace"
+        );
+    }
+
+    #[test]
+    fn topic_matching_known_namespace_routes_there() {
+        assert_eq!(route_namespace(Some("issa"), "workspace", &known(), false), "issa");
+        assert_eq!(route_namespace(Some("c0"), "workspace", &known(), false), "c0");
+        assert_eq!(
+            route_namespace(Some("homeschool"), "workspace", &known(), false),
+            "homeschool"
+        );
+    }
+
+    #[test]
+    fn known_match_is_case_insensitive_and_returns_canonical_form() {
+        // The classifier may upper-case; we snap to the canonical stored form.
+        assert_eq!(route_namespace(Some("ISSA"), "workspace", &known(), false), "issa");
+        assert_eq!(route_namespace(Some("C0"), "workspace", &known(), true), "c0");
+    }
+
+    #[test]
+    fn new_topic_without_allow_new_falls_back_to_source() {
+        assert_eq!(
+            route_namespace(Some("brand-new-topic"), "workspace", &known(), false),
+            "workspace"
+        );
+    }
+
+    #[test]
+    fn new_topic_with_allow_new_mints_the_topic_namespace() {
+        assert_eq!(
+            route_namespace(Some("brand-new-topic"), "workspace", &known(), true),
+            "brand-new-topic"
+        );
+    }
+
+    #[test]
+    fn empty_vocabulary_defers_to_allow_new_flag() {
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(route_namespace(Some("issa"), "workspace", &empty, false), "workspace");
+        assert_eq!(route_namespace(Some("issa"), "workspace", &empty, true), "issa");
     }
 }
