@@ -136,6 +136,26 @@ fn namespace_from_config_chain(path: &Path) -> Option<String> {
     None
 }
 
+/// Resolve a real filesystem path to a namespace: honour the nearest
+/// `.c0/config.toml` in the ancestry, map `$HOME` to `global`, else use the
+/// leaf folder name. Shared path-resolution core behind [`derive_namespace`].
+fn namespace_for_path(path: &Path) -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+
+    if let Some(ns) = namespace_from_config_chain(path) {
+        return ns;
+    }
+
+    if path == home {
+        return "global".to_string();
+    }
+
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("global")
+        .to_string()
+}
+
 fn derive_namespace(dir_name: &str) -> String {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
 
@@ -151,18 +171,7 @@ fn derive_namespace(dir_name: &str) -> String {
             .to_string();
     };
 
-    if let Some(ns) = namespace_from_config_chain(&path) {
-        return ns;
-    }
-
-    if path == home {
-        return "global".to_string();
-    }
-
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("global")
-        .to_string()
+    namespace_for_path(&path)
 }
 
 fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
@@ -2310,6 +2319,41 @@ mod enrichment_tests {
             derive_namespace("-home-douglasjordan-does-not-exist-anywhere"),
             "anywhere"
         );
+    }
+
+    #[test]
+    fn namespace_for_path_maps_home_to_global() {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+        assert_eq!(namespace_for_path(&home), "global");
+    }
+
+    #[test]
+    fn namespace_for_path_honours_nearest_config() {
+        let root = scratch_dir("nsforpath-config");
+        let project = root.join("reserve-padel");
+        let worktree = project.join("repo").join("main");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        std::fs::create_dir_all(project.join(".c0")).expect("create .c0");
+        std::fs::write(
+            project.join(".c0/config.toml"),
+            "namespace = \"reserve-padel\"\n",
+        )
+        .expect("write config");
+
+        assert_eq!(namespace_for_path(&worktree), "reserve-padel");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn namespace_for_path_falls_back_to_leaf_folder() {
+        let root = scratch_dir("nsforpath-leaf");
+        let project = root.join("cocokind-vbt");
+        std::fs::create_dir_all(&project).expect("create project");
+
+        assert_eq!(namespace_for_path(&project), "cocokind-vbt");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
