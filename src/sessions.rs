@@ -1045,7 +1045,8 @@ fn hermes_timestamp(v: Option<&serde_json::Value>) -> String {
     }
     if let Some(secs) = v.as_f64() {
         let nanos = ((secs.fract()) * 1_000_000_000.0).round() as u32;
-        if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs.trunc() as i64, nanos)
+        if let Some(dt) =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(secs.trunc() as i64, nanos)
         {
             return dt.to_rfc3339();
         }
@@ -1175,7 +1176,7 @@ struct HermesFileDecision {
 }
 
 /// Resolve a Hermes session file's identity and whether it can be skipped,
-/// using only its path and stat() — no read/parse. The returned
+/// using only its path and `stat()` — no read/parse. The returned
 /// `session_id` is the same key `import_hermes_sessions` stores the mtime
 /// under after processing, so the skip-check lookup and the post-write
 /// store always agree.
@@ -1199,6 +1200,10 @@ fn hermes_dedupe_decision(
 }
 
 /// Parse a Hermes webui session `.json` document into c0's `ParsedSession`.
+/// Production code reads+parses once and calls `parse_hermes_session_doc`
+/// directly (see `import_hermes_sessions`); this path-based wrapper only
+/// remains for tests that don't already have a parsed document in hand.
+#[cfg(test)]
 fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
     let content = std::fs::read_to_string(path)?;
     let doc: serde_json::Value = serde_json::from_str(&content)?;
@@ -1289,7 +1294,8 @@ fn parse_hermes_session_doc(doc: &serde_json::Value, path: &Path) -> ParsedSessi
 
         // Reasoning → reflection. Hermes stores it as `reasoning_content`
         // (preferred) or `reasoning`, both plain strings.
-        let reasoning = ext_string(msg, "reasoning_content").or_else(|| ext_string(msg, "reasoning"));
+        let reasoning =
+            ext_string(msg, "reasoning_content").or_else(|| ext_string(msg, "reasoning"));
         if let Some(r) = reasoning {
             turn.thinking_chars += r.len() as i64;
             turn.reflections.push(ParsedReflection {
@@ -1645,7 +1651,10 @@ pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractSt
 pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
     let sessions_dir = get_hermes_sessions_dir();
     if !sessions_dir.exists() {
-        println!("No Hermes sessions directory found at {}", sessions_dir.display());
+        println!(
+            "No Hermes sessions directory found at {}",
+            sessions_dir.display()
+        );
         return Ok(ExtractStats::default());
     }
 
@@ -2854,7 +2863,10 @@ mod enrichment_tests {
         assert_eq!(asst.role, "assistant");
         assert_eq!(asst.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(asst.reflections.len(), 1);
-        assert_eq!(asst.reflections[0].text, "The user wants help; I'll run a command.");
+        assert_eq!(
+            asst.reflections[0].text,
+            "The user wants help; I'll run a command."
+        );
         assert_eq!(asst.tool_use_count, 2);
         assert_eq!(asst.toolcalls.len(), 2);
         assert_eq!(asst.toolcalls[0].name, "terminal");
@@ -2918,19 +2930,26 @@ mod enrichment_tests {
 
         // Mirror the loop's post-write store step exactly: insert under the
         // decision's own session_id, the same field used for the lookup.
-        dir_state
-            .sessions
-            .insert(first.session_id.clone(), first.current_mtime.expect("mtime"));
+        dir_state.sessions.insert(
+            first.session_id.clone(),
+            first.current_mtime.expect("mtime"),
+        );
 
         let second = hermes_dedupe_decision(&dir_state, &path, false).expect("resolves an id");
         assert_eq!(
             first.session_id, second.session_id,
             "the skip-check lookup key and the post-write store key must be identical"
         );
-        assert!(second.skip, "an unchanged file must be skipped without reading/parsing it");
+        assert!(
+            second.skip,
+            "an unchanged file must be skipped without reading/parsing it"
+        );
 
         let forced = hermes_dedupe_decision(&dir_state, &path, true).expect("resolves an id");
-        assert!(!forced.skip, "force must bypass the skip even when mtime is unchanged");
+        assert!(
+            !forced.skip,
+            "force must bypass the skip even when mtime is unchanged"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

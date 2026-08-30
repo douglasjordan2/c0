@@ -1056,9 +1056,7 @@ async fn main() -> Result<()> {
                         sessions::import_hermes_sessions(force).await?;
                     }
                     other => {
-                        anyhow::bail!(
-                            "Unknown import source '{other}'. Supported sources: hermes"
-                        );
+                        anyhow::bail!("Unknown import source '{other}'. Supported sources: hermes");
                     }
                 }
                 return Ok(());

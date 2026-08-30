@@ -170,7 +170,7 @@ Beyond the core commands, c0 includes a few subsystems worth knowing about (full
 
 - **Live sources** — `c0 link source add <name> --url <url>` fetches and embeds a page; `c0 fetch <query>` and `c0 link source search` retrieve over them, so external references stay fresh in the graph.
 - **Triggers** — `c0 trigger add <regex>` (or `--semantic`) decide when a prompt should consult c0; pair one with a [hook](#using-c0-with-claude-code) for hands-off recall.
-- **Sessions** — index your assistant transcripts (build with `--features sessions`), then `c0 sessions search`, `c0 sessions resume`, and track spend with `c0 sessions cost`.
+- **Sessions** — index your assistant transcripts (build with `--features sessions`), then `c0 sessions search`, `c0 sessions resume`, and track spend with `c0 sessions cost`. Pull in another harness's transcripts with `c0 sessions import --from hermes`.
 - **Raw queries & history** — `c0 find "<cypher>"` runs Cypher directly against the graph; `c0 invalidation-chain <name>` reads a concept's causal history.
 - **Maintenance** — `c0 backfill embeddings`, `c0 audit`, `c0 move`, `c0 export`, `c0 status`, `c0 config show`.
 
@@ -335,7 +335,7 @@ If you use [Claude Code](https://claude.com/claude-code), an optional feature in
 cargo install --path . --features sessions
 ```
 
-This is the reference example of c0's **source-adapter** pattern — the same shape any "fill the graph from <source>" integration would take.
+This is the reference example of c0's **source-adapter** pattern — the same shape any "fill the graph from <source>" integration takes. Hermes agent sessions (`~/.hermes/webui/sessions/*.json`) are a second such adapter: `c0 sessions import --from hermes` (add `--force` to re-import unchanged files).
 
 ## The reflection loop — c0's learning engine
 
