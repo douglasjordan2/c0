@@ -428,6 +428,25 @@ impl NamespaceContext {
             project_type: None,
         }
     }
+
+    /// Build a context targeting an explicitly named namespace, without a `.c0`
+    /// project dir on disk. Mirrors what `detect_namespace` produces for a
+    /// default project (`inherit_global = true`): the search list is the named
+    /// namespace plus a `global` fallback tail. Used by `c0 walk --context <ns>`
+    /// so the flag scopes the traversal instead of being ignored.
+    pub fn for_namespace(namespace: &str) -> Self {
+        let mut namespaces = vec![namespace.to_string()];
+        if namespace != "global" {
+            namespaces.push("global".to_string());
+        }
+        NamespaceContext {
+            namespace: namespace.to_string(),
+            project_dir: None,
+            parent_dirs: Vec::new(),
+            namespaces,
+            project_type: None,
+        }
+    }
 }
 
 pub fn detect_namespace() -> NamespaceContext {
@@ -723,4 +742,33 @@ pub fn get_all_patches_dirs(ctx: &NamespaceContext) -> Vec<PathBuf> {
     }
 
     dirs.into_iter().filter(|d| d.exists()).collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // Regression: `c0 walk <c> -c <ns>` must actually scope the traversal to
+    // <ns>. `for_namespace` builds the same context a `.c0/config.toml` with
+    // `namespace = <ns>` (default `inherit_global = true`) would produce, so the
+    // walk arm can honor -c without requiring the user to cd into a project dir.
+    #[test]
+    fn for_namespace_scopes_to_that_namespace_plus_global() {
+        let ctx = NamespaceContext::for_namespace("work");
+        assert_eq!(ctx.namespace, "work");
+        // default projects inherit_global, so global is a fallback tail.
+        assert_eq!(
+            ctx.namespaces,
+            vec!["work".to_string(), "global".to_string()]
+        );
+    }
+
+    #[test]
+    fn for_namespace_global_is_just_global() {
+        let ctx = NamespaceContext::for_namespace("global");
+        assert_eq!(ctx.namespace, "global");
+        // No duplicate global tail when the target already is global.
+        assert_eq!(ctx.namespaces, vec!["global".to_string()]);
+    }
 }

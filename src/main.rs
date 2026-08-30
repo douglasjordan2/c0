@@ -1695,6 +1695,17 @@ async fn main() -> Result<()> {
             let timer = Instant::now();
             let walk_limit = limit.unwrap_or(graph::WALK_DEFAULT_LIMIT);
 
+            // Honor `--context <ns>`: scope the traversal to the named namespace
+            // instead of whatever the cwd resolved to. Without this the flag was
+            // used only for dead-end telemetry and the walk silently searched
+            // the cwd's namespace (default `global`), so `c0 walk <c> -c work`
+            // dead-ended even on a populated `work` graph.
+            let walk_ctx = match context {
+                Some(ref ns) => config::NamespaceContext::for_namespace(ns),
+                None => ctx,
+            };
+            let ctx = &walk_ctx;
+
             let temporal = {
                 let mut t = graph::TemporalQuery::default();
                 if let Some(ref date_str) = as_of {
