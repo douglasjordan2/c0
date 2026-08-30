@@ -1177,11 +1177,16 @@ fn resolve_hermes_session_id(doc: &serde_json::Value, path: &Path) -> String {
 fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
     let content = std::fs::read_to_string(path)?;
     let doc: serde_json::Value = serde_json::from_str(&content)?;
+    Ok(parse_hermes_session_doc(&doc, path))
+}
 
-    let session_id = resolve_hermes_session_id(&doc, path);
+/// Same as `parse_hermes_session`, but for a document already read and
+/// parsed by the caller (avoids a redundant read+parse of the same file).
+fn parse_hermes_session_doc(doc: &serde_json::Value, path: &Path) -> ParsedSession {
+    let session_id = resolve_hermes_session_id(doc, path);
 
-    let workspace = ext_string(&doc, "workspace")
-        .or_else(|| ext_string(&doc, "created_workspace"))
+    let workspace = ext_string(doc, "workspace")
+        .or_else(|| ext_string(doc, "created_workspace"))
         .unwrap_or_default();
     let namespace = if workspace.is_empty() {
         "global".to_string()
@@ -1195,16 +1200,16 @@ fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
         if t.is_empty() { None } else { Some(t) }
     };
 
-    let doc_model = ext_string(&doc, "model");
+    let doc_model = ext_string(doc, "model");
 
     let mut parsed = ParsedSession {
         session_id: session_id.clone(),
         namespace,
         cwd: workspace.clone(),
-        git_branch: ext_string(&doc, "worktree_branch"),
+        git_branch: ext_string(doc, "worktree_branch"),
         is_sidechain_overall: false,
-        summary: ext_string(&doc, "title"),
-        slug: ext_string(&doc, "title"),
+        summary: ext_string(doc, "title"),
+        slug: ext_string(doc, "title"),
         created_at,
         ended_at,
         ..ParsedSession::default()
@@ -1299,7 +1304,7 @@ fn parse_hermes_session(path: &Path) -> Result<ParsedSession> {
         parsed.first_prompt = "No prompt".to_string();
     }
 
-    Ok(parsed)
+    parsed
 }
 
 async fn embed_text_opt(
@@ -1651,6 +1656,22 @@ pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
     use std::io::Write;
     for f in &json_files {
         let path = f.path();
+        let filename_key = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if filename_key.is_empty() {
+            continue;
+        }
+
+        let current_mtime = file_mtime_ms(&path);
+        let stored_mtime = dir_state.sessions.get(&filename_key).copied();
+
+        if !force && stored_mtime == current_mtime && current_mtime.is_some() {
+            stats.sessions_skipped += 1;
+            continue;
+        }
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -1673,42 +1694,25 @@ pub async fn import_hermes_sessions(force: bool) -> Result<ExtractStats> {
             continue;
         }
 
-        let current_mtime = file_mtime_ms(&path);
-        let stored_mtime = dir_state.sessions.get(&session_id).copied();
+        let parsed = parse_hermes_session_doc(&doc, &path);
+        let namespace = parsed.namespace.clone();
+        let n_turns = parsed.turns.len();
+        let n_refl: usize = parsed.turns.iter().map(|t| t.reflections.len()).sum();
+        let n_tc: usize = parsed.turns.iter().map(|t| t.toolcalls.len()).sum();
+        print!("  [{namespace}] {session_id} → {n_turns} turn(s), {n_refl} refl, {n_tc} tc ... ");
+        std::io::stdout().flush().ok();
 
-        if !force && stored_mtime == current_mtime && current_mtime.is_some() {
-            stats.sessions_skipped += 1;
-            continue;
-        }
-
-        match parse_hermes_session(&path) {
-            Ok(parsed) => {
-                let namespace = parsed.namespace.clone();
-                let n_turns = parsed.turns.len();
-                let n_refl: usize = parsed.turns.iter().map(|t| t.reflections.len()).sum();
-                let n_tc: usize = parsed.turns.iter().map(|t| t.toolcalls.len()).sum();
-                print!(
-                    "  [{namespace}] {session_id} → {n_turns} turn(s), {n_refl} refl, {n_tc} tc ... "
-                );
-                std::io::stdout().flush().ok();
-
-                match write_parsed_session(&graph_conn, parsed, ollama.as_ref(), &mut stats).await {
-                    Ok(()) => {
-                        stats.sessions_extracted += 1;
-                        if let Some(m) = current_mtime {
-                            dir_state.sessions.insert(session_id, m);
-                        }
-                        println!("✓");
-                    }
-                    Err(e) => {
-                        stats.errors += 1;
-                        println!("✗ {e}");
-                    }
+        match write_parsed_session(&graph_conn, parsed, ollama.as_ref(), &mut stats).await {
+            Ok(()) => {
+                stats.sessions_extracted += 1;
+                if let Some(m) = current_mtime {
+                    dir_state.sessions.insert(session_id, m);
                 }
+                println!("✓");
             }
             Err(e) => {
                 stats.errors += 1;
-                eprintln!("  parse error for {session_id}: {e}");
+                println!("✗ {e}");
             }
         }
     }
