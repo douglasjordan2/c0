@@ -18,6 +18,7 @@ pub enum LlmProvider {
     Kilo,
     Gemini,
     Ollama,
+    OpenRouter,
 }
 
 impl LlmProvider {
@@ -28,6 +29,7 @@ impl LlmProvider {
             "kilo" | "kilocode" => Self::Kilo,
             "gemini" => Self::Gemini,
             "ollama" => Self::Ollama,
+            "openrouter" => Self::OpenRouter,
             "claude-cli" | "claude_cli" | "cli" | "subscription" => Self::ClaudeCli,
             _ => Self::Claude,
         }
@@ -142,6 +144,7 @@ impl LlmClient {
             LlmProvider::Kilo => "kilo",
             LlmProvider::Gemini => "gemini",
             LlmProvider::Ollama => "ollama",
+            LlmProvider::OpenRouter => "openrouter",
         }
     }
 
@@ -173,6 +176,9 @@ impl LlmClient {
                 .generate_claude(prompt, json_schema, resume_session)
                 .await;
         }
+        if matches!(self.provider, LlmProvider::OpenRouter) {
+            return self.generate_openrouter(prompt, json_schema).await;
+        }
         if self.api_key.is_some() && matches!(self.provider, LlmProvider::Claude) {
             return self.generate_anthropic_api(prompt, json_schema).await;
         }
@@ -190,6 +196,7 @@ impl LlmClient {
             LlmProvider::Kilo => self.generate_kilo(prompt).await,
             LlmProvider::Ollama => unreachable!("Ollama handled above"),
             LlmProvider::ClaudeCli => unreachable!("ClaudeCli handled above"),
+            LlmProvider::OpenRouter => unreachable!("OpenRouter handled above"),
         }
     }
 
@@ -457,6 +464,124 @@ impl LlmClient {
                 cache_read,
                 cache_create,
             )
+        });
+
+        Ok(LlmResponse {
+            result: result_text,
+            total_cost_usd: cost,
+            session_id: parsed
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string),
+            is_error: false,
+        })
+    }
+
+    /// `OpenRouter` (OpenAI-compatible) chat-completions provider.
+    ///
+    /// Mirrors `generate_anthropic_api` but talks to `OpenRouter`'s OpenAI-format
+    /// endpoint. Structured output uses function/tool-calling with a forced
+    /// `structured_output` tool — the same reliable mechanism the Anthropic path
+    /// uses — because plain JSON-mode is inconsistent across `OpenRouter` models.
+    /// Reads the key from `OPENROUTER_API_KEY` (independent of the Anthropic key).
+    async fn generate_openrouter(
+        &self,
+        prompt: &str,
+        json_schema: Option<&str>,
+    ) -> Result<LlmResponse> {
+        let api_key = std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("OPENROUTER_API_KEY not set"))?;
+
+        let body = if let Some(schema) = json_schema {
+            let params: serde_json::Value =
+                serde_json::from_str(schema).map_err(|e| anyhow!("Invalid JSON schema: {e}"))?;
+            serde_json::json!({
+                "model": self.model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "structured_output",
+                        "description": "Return the result in the required structured format.",
+                        "parameters": params,
+                    },
+                }],
+                "tool_choice": {"type": "function", "function": {"name": "structured_output"}},
+            })
+        } else {
+            serde_json::json!({
+                "model": self.model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+        };
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .connect_timeout(Duration::from_secs(10))
+            .build()?;
+
+        let resp = client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .header("X-Title", "c0")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("OpenRouter API request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("OpenRouter API returned {status}: {body_text}");
+        }
+
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse OpenRouter API response: {e}"))?;
+
+        let message = parsed
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|choice| choice.get("message"));
+
+        let mut result_text = String::new();
+        if let Some(message) = message {
+            // Prefer the forced tool call's arguments (the structured JSON).
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array())
+                && let Some(first) = tool_calls.first()
+                && let Some(args) = first
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+            {
+                result_text = args.to_string();
+            }
+            // Fall back to plain content (non-schema calls, or models that
+            // answer in the content field instead of a tool call).
+            if result_text.is_empty()
+                && let Some(content) = message.get("content").and_then(|c| c.as_str())
+            {
+                result_text = content.to_string();
+            }
+        }
+
+        let cost = parsed.get("usage").and_then(|u| {
+            let input_tokens = u
+                .get("prompt_tokens")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let output_tokens = u
+                .get("completion_tokens")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            estimate_cost_usd(&self.model, input_tokens, output_tokens, 0.0, 0.0)
         });
 
         Ok(LlmResponse {
@@ -847,7 +972,7 @@ fn provider_binary(provider: LlmProvider, binaries: &LlmBinaries) -> String {
         LlmProvider::Codex => binaries.codex.clone(),
         LlmProvider::Kilo => binaries.kilo.clone(),
         LlmProvider::Gemini => binaries.gemini.clone(),
-        LlmProvider::Ollama => String::new(),
+        LlmProvider::Ollama | LlmProvider::OpenRouter => String::new(),
     }
 }
 
@@ -1250,5 +1375,52 @@ mod tests {
         assert_eq!(client.model, "sonnet");
         assert_eq!(client.timeout_secs, 120);
         assert_eq!(client.max_budget_usd, config.max_budget_usd);
+    }
+
+    #[test]
+    fn test_openrouter_provider_parses_and_names_correctly() {
+        assert_eq!(LlmProvider::parse("openrouter"), LlmProvider::OpenRouter);
+        assert_eq!(LlmProvider::parse("OpenRouter"), LlmProvider::OpenRouter);
+
+        let binaries = LlmBinaries::default();
+        let client = LlmClient {
+            provider: LlmProvider::OpenRouter,
+            model: "openai/gpt-4o".to_string(),
+            timeout_secs: 60,
+            max_budget_usd: None,
+            binary: binaries.claude,
+            api_key: None,
+            ollama_host: None,
+        };
+        assert_eq!(client.provider_name(), "openrouter");
+    }
+
+    #[tokio::test]
+    async fn test_generate_openrouter_errors_without_api_key() {
+        if std::env::var("OPENROUTER_API_KEY").is_ok() {
+            // Can't safely unset env vars under `unsafe_code = "forbid"`; skip
+            // rather than assert against a key that's actually configured.
+            return;
+        }
+
+        let binaries = LlmBinaries::default();
+        let client = LlmClient {
+            provider: LlmProvider::OpenRouter,
+            model: "openai/gpt-4o".to_string(),
+            timeout_secs: 60,
+            max_budget_usd: None,
+            binary: binaries.claude,
+            api_key: None,
+            ollama_host: None,
+        };
+
+        let err = client
+            .generate_internal("hello", None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("OPENROUTER_API_KEY not set"),
+            "unexpected error message: {err}"
+        );
     }
 }
