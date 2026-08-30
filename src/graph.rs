@@ -657,7 +657,7 @@ pub async fn add_patch(
             let mut patch_anchors = graph
                 .execute(
                     query(
-                        "MATCH (c:Concept)-[:HAS_PATCH]->(:KnowledgePatch {name: $target})
+                        "MATCH (c:Concept)-[:HAS_PATCH|DISCUSSED_IN]->(:KnowledgePatch {name: $target})
                      WHERE c.namespace IN $namespaces
                      RETURN DISTINCT c.name AS name",
                     )
@@ -797,7 +797,7 @@ pub async fn get_patches_temporal(
     let temporal_clause = temporal.build_and_clause("p");
 
     let cypher = format!(
-        "MATCH (c:Concept {{name: $name}})-[:HAS_PATCH]->(p:KnowledgePatch)
+        "MATCH (c:Concept {{name: $name}})-[:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
          WHERE c.namespace IN $namespaces AND (p.namespace IS NULL OR p.namespace IN $namespaces){temporal_clause}
          RETURN p.name AS name, p.patch_file AS file, p.content AS content,
                 COALESCE(p.namespace, 'global') AS namespace, p.url AS url,
@@ -894,7 +894,7 @@ pub async fn search_concepts(
             query(
                 "MATCH (c:Concept)
              WHERE toLower(c.name) CONTAINS toLower($term) AND c.namespace IN $namespaces
-             OPTIONAL MATCH (c)-[:HAS_PATCH]->(p:KnowledgePatch)
+             OPTIONAL MATCH (c)-[:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
              RETURN c.name AS name, count(p) AS patch_count
              ORDER BY patch_count DESC, size(c.name)",
             )
@@ -2020,12 +2020,22 @@ pub async fn move_concept(
         .await?;
 
     let patches_moved = if include_patches {
+        // HAS_PATCH is 1:1 (a concept owns its patch), so it always follows the
+        // concept. DISCUSSED_IN is many-concepts -> one transcript patch, so a
+        // shared patch must only move when NO other concept still references it
+        // in the old namespace — otherwise moving it would strand those
+        // concepts' reachability.
         let mut patch_result = graph.execute(
             query(
-                "MATCH (c:Concept {name: $name, namespace: $to_namespace})-[:HAS_PATCH]->(p:KnowledgePatch)
+                "MATCH (c:Concept {name: $name, namespace: $to_namespace})-[r:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
                  WHERE p.namespace = $old_namespace
+                   AND (type(r) = 'HAS_PATCH'
+                        OR NOT EXISTS {
+                             MATCH (other:Concept)-[:HAS_PATCH|DISCUSSED_IN]->(p)
+                             WHERE other.namespace = $old_namespace AND other.name <> $name
+                        })
                  SET p.namespace = $to_namespace
-                 RETURN count(p) AS moved"
+                 RETURN count(DISTINCT p) AS moved"
             )
             .param("name", name)
             .param("to_namespace", to_namespace)
@@ -2076,27 +2086,34 @@ pub async fn move_concepts_by_prefix(
         .await?
         .map_or(0, |r| r.get("moved").unwrap_or(0));
 
-    let patches_moved =
-        if include_patches {
-            let mut patch_result = graph.execute(
+    let patches_moved = if include_patches {
+        // HAS_PATCH (1:1) always follows its concept. A shared DISCUSSED_IN
+        // transcript patch moves only when no concept LEFT BEHIND in the old
+        // namespace still references it — i.e. no non-matching concept holds
+        // it (all prefix-matching concepts moved together above).
+        let mut patch_result = graph.execute(
             query(
-                "MATCH (c:Concept {namespace: $to_namespace})-[:HAS_PATCH]->(p:KnowledgePatch)
+                "MATCH (c:Concept {namespace: $to_namespace})-[r:HAS_PATCH|DISCUSSED_IN]->(p:KnowledgePatch)
                  WHERE c.name =~ $pattern AND p.namespace = $from_namespace
+                   AND (type(r) = 'HAS_PATCH'
+                        OR NOT EXISTS {
+                             MATCH (other:Concept {namespace: $from_namespace})-[:HAS_PATCH|DISCUSSED_IN]->(p)
+                        })
                  SET p.namespace = $to_namespace
-                 RETURN count(p) AS moved"
+                 RETURN count(DISTINCT p) AS moved"
             )
             .param("from_namespace", from_namespace)
             .param("to_namespace", to_namespace)
             .param("pattern", pattern.clone())
         ).await?;
 
-            patch_result
-                .next()
-                .await?
-                .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
-        } else {
-            0
-        };
+        patch_result
+            .next()
+            .await?
+            .map_or(0, |r| r.get::<i64>("moved").unwrap_or(0))
+    } else {
+        0
+    };
 
     Ok((concepts_moved, patches_moved))
 }
