@@ -1174,6 +1174,11 @@ pub struct ConceptExtractionResult {
 pub struct ExtractedConcept {
     pub name: String,
     pub description: String,
+    /// Optional topic label proposed by the classifier. When per-topic
+    /// namespace routing is enabled it is snapped onto the known-namespace
+    /// vocabulary; otherwise it is ignored and the source namespace is used.
+    #[serde(default)]
+    pub topic: Option<String>,
 }
 
 #[cfg(feature = "sessions")]
@@ -1201,6 +1206,61 @@ Session text:
 
 #[cfg(feature = "sessions")]
 const SESSION_CONCEPT_SCHEMA: &str = r#"{"type":"object","properties":{"concepts":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"}},"required":["name","description"],"additionalProperties":false}}},"required":["concepts"],"additionalProperties":false}"#;
+
+/// Topic-aware variant of the session concept prompt. Used only when per-topic
+/// namespace routing is enabled: each concept also carries a `topic` label the
+/// router snaps onto the allowed-namespace set. `{known}` is replaced with the
+/// session's own namespace ancestry (self + parents + global) plus the
+/// configured allow-list — the ONLY buckets a concept may be filed under.
+#[cfg(feature = "sessions")]
+const SESSION_CONCEPT_TOPIC_PROMPT: &str = r#"You are a knowledge curator. Extract distinct technology concepts, libraries, frameworks, patterns, methodologies, or domain ideas discussed in this Claude Code session.
+
+For each concept return:
+- name: lowercase kebab-case identifier (e.g. "rust-async", "neo4j-vector-index", "systemd-timer")
+- description: one-sentence summary of what was discussed about it (max 200 chars)
+- topic: which of these buckets this concept belongs in, chosen from this list: {known}. Pick the single best-fitting bucket. If none of them clearly fit, use the first (the session's own namespace). Do NOT invent bucket names outside this list.
+
+Rules:
+- Extract up to {max} distinct concepts, ranked by relevance
+- Names must be lowercase kebab-case, alphanumeric + hyphens only
+- Skip generic terms: database, api, code, app, file, function, variable, system, hook, type, stuff, things, service
+- Skip pronouns, articles, and one-off local names (file paths, variable names)
+- Skip people's names
+- Each concept should be something you'd actually want to look up later
+
+Return ONLY valid JSON in this exact format (no prose, no markdown):
+{"concepts": [{"name": "...", "description": "...", "topic": "..."}]}
+
+If no extractable concepts, return: {"concepts": []}
+
+Session text:
+{text}"#;
+
+#[cfg(feature = "sessions")]
+const SESSION_CONCEPT_TOPIC_SCHEMA: &str = r#"{"type":"object","properties":{"concepts":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"topic":{"type":"string"}},"required":["name","description","topic"],"additionalProperties":false}}},"required":["concepts"],"additionalProperties":false}"#;
+
+/// Normalize a raw topic label into a namespace-safe token: lowercase,
+/// kebab-case, alphanumeric + hyphens only. Returns `None` for empty, missing,
+/// or fully-invalid labels so callers fall back to the source namespace.
+pub fn sanitize_topic_label(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let mut token = String::with_capacity(raw.len());
+    let mut prev_hyphen = false;
+    for ch in raw.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+            prev_hyphen = false;
+        } else if (ch == '-' || ch == '_' || ch == ' ' || ch == '/') && !prev_hyphen {
+            token.push('-');
+            prev_hyphen = true;
+        }
+    }
+    let trimmed = token.trim_matches('-').to_string();
+    if trimmed.len() < 2 || trimmed.len() > 60 {
+        return None;
+    }
+    Some(trimmed)
+}
 
 const CONCEPT_EXTRACTION_PROMPT: &str = r#"Extract 1-3 specific technology concepts from this prompt that would benefit from knowledge lookup.
 
@@ -1280,6 +1340,37 @@ impl LlmClient {
 
         parse_session_concepts(&response.result, max_concepts)
     }
+
+    /// Topic-aware extraction: each concept also carries a `topic` label the
+    /// caller snaps onto the known-namespace vocabulary. `known` is the current
+    /// controlled vocabulary offered to the model to encourage reuse.
+    #[cfg(feature = "sessions")]
+    pub async fn extract_session_concepts_with_topics(
+        &self,
+        text: &str,
+        max_concepts: usize,
+        known: &[String],
+    ) -> Result<Vec<ExtractedConcept>> {
+        let known_list = if known.is_empty() {
+            "(none yet — propose concise topic labels)".to_string()
+        } else {
+            known.join(", ")
+        };
+        let prompt = SESSION_CONCEPT_TOPIC_PROMPT
+            .replace("{max}", &max_concepts.to_string())
+            .replace("{known}", &known_list)
+            .replace("{text}", text);
+
+        let response = self
+            .generate(&prompt, Some(SESSION_CONCEPT_TOPIC_SCHEMA))
+            .await?;
+
+        if let Some(cost) = response.total_cost_usd {
+            log_usage("session-enrichment", &self.model, cost);
+        }
+
+        parse_session_concepts(&response.result, max_concepts)
+    }
 }
 
 #[cfg(feature = "sessions")]
@@ -1333,7 +1424,11 @@ fn parse_session_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>
             } else {
                 description
             };
-            Some(ExtractedConcept { name, description })
+            Some(ExtractedConcept {
+                name,
+                description,
+                topic: sanitize_topic_label(c.topic.as_deref()),
+            })
         })
         .take(max)
         .collect();
@@ -1422,5 +1517,66 @@ mod tests {
             err.to_string().contains("OPENROUTER_API_KEY not set"),
             "unexpected error message: {err}"
         );
+    }
+
+    #[test]
+    fn sanitize_topic_label_normalizes_to_kebab() {
+        assert_eq!(
+            sanitize_topic_label(Some("  ISSA Project ")),
+            Some("issa-project".to_string())
+        );
+        assert_eq!(
+            sanitize_topic_label(Some("home_school")),
+            Some("home-school".to_string())
+        );
+        assert_eq!(
+            sanitize_topic_label(Some("c0/graph")),
+            Some("c0-graph".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_topic_label_collapses_and_trims_separators() {
+        assert_eq!(
+            sanitize_topic_label(Some("--foo   bar--")),
+            Some("foo-bar".to_string())
+        );
+        assert_eq!(
+            sanitize_topic_label(Some("a !!! b")),
+            Some("a-b".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_topic_label_rejects_empty_or_invalid() {
+        assert_eq!(sanitize_topic_label(None), None);
+        assert_eq!(sanitize_topic_label(Some("")), None);
+        assert_eq!(sanitize_topic_label(Some("   ")), None);
+        assert_eq!(sanitize_topic_label(Some("!!!")), None);
+        // Single alphanumeric char is below the 2-char floor.
+        assert_eq!(sanitize_topic_label(Some("x")), None);
+    }
+
+    #[cfg(feature = "sessions")]
+    #[test]
+    fn parse_session_concepts_reads_topic_field() {
+        let raw = r#"{"concepts":[
+            {"name":"neo4j-vector-index","description":"Vector search in Neo4j","topic":"C0"},
+            {"name":"issa-enrollment","description":"ISSA student enrollment flow","topic":"issa"}
+        ]}"#;
+        let out = parse_session_concepts(raw, 5).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].topic.as_deref(), Some("c0"));
+        assert_eq!(out[1].topic.as_deref(), Some("issa"));
+    }
+
+    #[cfg(feature = "sessions")]
+    #[test]
+    fn parse_session_concepts_tolerates_missing_topic() {
+        // Legacy schema (no topic) must still parse; topic defaults to None.
+        let raw = r#"{"concepts":[{"name":"rust-async","description":"async runtime"}]}"#;
+        let out = parse_session_concepts(raw, 5).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].topic, None);
     }
 }

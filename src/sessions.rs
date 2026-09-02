@@ -174,6 +174,39 @@ fn derive_namespace(dir_name: &str) -> String {
     namespace_for_path(&path)
 }
 
+/// Choose the destination namespace for one extracted concept under per-topic
+/// routing.
+///
+/// - `topic`: the classifier's sanitized topic label (already lowercase
+///   kebab-case) or `None` when the model gave nothing usable.
+/// - `source`: the folder-derived namespace for the whole session/document —
+///   the legacy destination and the fallback here.
+/// - `allowed`: the controlled set the concept may be routed into — the
+///   session's OWN namespace ancestry (self + parent chain + `global`) plus the
+///   configured `[extraction.routing] known_namespaces` allow-list. This set
+///   NEVER contains a peer project's namespace.
+///
+/// Ancestry-scoped routing (Doug's #74 review). A topic only means "which of
+/// *my* ancestor buckets does this belong in":
+/// - No topic → route to `source`.
+/// - Topic matches an allowed namespace (case-insensitive) → that namespace.
+/// - Topic matches nothing in `allowed` → route to `source`.
+///
+/// A topic naming a namespace outside `allowed` (e.g. a peer project the
+/// conversation drifted onto) can never route there — cross-project writes are
+/// impossible by construction, not merely discouraged by the prompt.
+fn route_namespace(topic: Option<&str>, source: &str, allowed: &[String]) -> String {
+    let Some(topic) = topic.map(str::trim).filter(|t| !t.is_empty()) else {
+        return source.to_string();
+    };
+
+    allowed
+        .iter()
+        .find(|ns| ns.eq_ignore_ascii_case(topic))
+        .cloned()
+        .unwrap_or_else(|| source.to_string())
+}
+
 fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
     std::fs::metadata(path)
         .ok()
@@ -1684,7 +1717,11 @@ fn parse_ollama_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>>
             } else {
                 desc
             };
-            Some(ExtractedConcept { name, description })
+            Some(ExtractedConcept {
+                name,
+                description,
+                topic: crate::claude::sanitize_topic_label(c.topic.as_deref()),
+            })
         })
         .take(max)
         .collect();
@@ -1694,6 +1731,7 @@ fn parse_ollama_concepts(raw: &str, max: usize) -> Result<Vec<ExtractedConcept>>
 async fn extract_session_concepts(
     text: &str,
     max_concepts: usize,
+    known: Option<&[String]>,
 ) -> Result<Vec<ExtractedConcept>> {
     let semantic_config = config::SemanticConfig::load();
 
@@ -1706,6 +1744,8 @@ async fn extract_session_concepts(
     if client.provider_name() == "ollama" {
         let model_override = std::env::var("C0_ENRICH_MODEL").ok();
         let model = model_override.unwrap_or_else(|| client.model.clone());
+        // The Ollama enrichment path does not emit topic labels; per-topic
+        // routing degrades gracefully to source-namespace fallback here.
         return extract_session_concepts_ollama(
             &semantic_config.ollama_host,
             &model,
@@ -1715,7 +1755,14 @@ async fn extract_session_concepts(
         .await;
     }
 
-    client.extract_session_concepts(text, max_concepts).await
+    match known {
+        Some(vocab) => {
+            client
+                .extract_session_concepts_with_topics(text, max_concepts, vocab)
+                .await
+        }
+        None => client.extract_session_concepts(text, max_concepts).await,
+    }
 }
 
 /// Collapse a string to a single capped line for the signal block.
@@ -1898,6 +1945,7 @@ async fn extract_concepts_full(
     inputs: &EnrichmentInputs,
     budget: usize,
     max_concepts: usize,
+    known: Option<&[String]>,
 ) -> Result<Vec<ExtractedConcept>> {
     let signal = build_signal_block(
         &inputs.files,
@@ -1936,7 +1984,7 @@ async fn extract_concepts_full(
         if chunk.trim().is_empty() {
             continue;
         }
-        match extract_session_concepts(chunk, max_concepts).await {
+        match extract_session_concepts(chunk, max_concepts, known).await {
             Ok(concepts) => {
                 for c in concepts {
                     if seen.insert(c.name.clone()) {
@@ -1958,6 +2006,7 @@ async fn extract_concepts_for_session(
     session_id: &str,
     budget: usize,
     max_concepts: usize,
+    known: Option<&[String]>,
 ) -> Result<(Vec<ExtractedConcept>, usize)> {
     let inputs = graph::get_session_enrichment_inputs(graph_conn, session_id).await?;
     if inputs.turns.is_empty() && inputs.reflections.is_empty() {
@@ -1966,7 +2015,7 @@ async fn extract_concepts_for_session(
 
     if enrichment_full() {
         let total: usize = inputs.turns.iter().map(|t| t.text.len()).sum();
-        let concepts = extract_concepts_full(&inputs, budget, max_concepts).await?;
+        let concepts = extract_concepts_full(&inputs, budget, max_concepts, known).await?;
         Ok((concepts, total))
     } else {
         let text = build_enrichment_text(&inputs, budget);
@@ -1974,29 +2023,71 @@ async fn extract_concepts_for_session(
             return Ok((Vec::new(), 0));
         }
         let len = text.len();
-        let concepts = extract_session_concepts(&text, max_concepts).await?;
+        let concepts = extract_session_concepts(&text, max_concepts, known).await?;
         Ok((concepts, len))
     }
+}
+
+/// Assemble the controlled namespace vocabulary for per-topic routing, scoped
+/// to the session's OWN namespace ancestry via `config::resolve_namespaces`
+/// (self, parent chain, and `global`) UNION the configured
+/// `[extraction.routing]` `known_namespaces` allow-list, deduplicated
+/// (case-insensitive).
+///
+/// `session_cwd` should be the session's own recorded working directory (see
+/// `Session.cwd` in graph.rs), so the ancestry walk is anchored on the
+/// project the session actually belongs to rather than the invoking
+/// process's cwd — batch enrichment and `--session <id>` calls may run from
+/// an unrelated directory. Pass `None` when the session has no recorded cwd.
+///
+/// This is deliberately NOT sourced from the whole graph: offering a peer
+/// project's namespace as vocab is exactly what let a drifting session route a
+/// concept into another project. Ancestry + allow-list is the only set the
+/// classifier ever sees, and [`route_namespace`] is constrained to the same
+/// set, so cross-project writes are impossible by construction.
+fn known_namespace_vocabulary(
+    namespace: &str,
+    session_cwd: Option<&Path>,
+    routing: &config::RoutingConfig,
+) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut vocab: Vec<String> = Vec::new();
+    let mut push = |ns: &str| {
+        let key = ns.to_lowercase();
+        if !ns.is_empty() && seen.insert(key) {
+            vocab.push(ns.to_string());
+        }
+    };
+    for ns in config::resolve_namespaces(namespace, session_cwd) {
+        push(&ns);
+    }
+    for ns in &routing.known_namespaces {
+        push(ns);
+    }
+    vocab
 }
 
 pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
+    let extraction = config::ExtractionConfig::load();
     let ollama = embeddings::OllamaClient::from_config(&semantic_config);
 
     let mut stats = EnrichStats::default();
 
-    if !force {
-        let mut r = graph_conn
-            .execute(
-                neo4rs::query(
-                    "MATCH (s:Session {session_id: $id})
-                 RETURN s.enriched_at AS enriched_at, s.deep_indexed_at AS deep_at",
-                )
-                .param("id", session_id),
+    let mut r = graph_conn
+        .execute(
+            neo4rs::query(
+                "MATCH (s:Session {session_id: $id})
+                 RETURN s.enriched_at AS enriched_at, s.deep_indexed_at AS deep_at, s.cwd AS cwd",
             )
-            .await?;
-        if let Some(row) = r.next().await? {
+            .param("id", session_id),
+        )
+        .await?;
+    let mut session_cwd: Option<String> = None;
+    if let Some(row) = r.next().await? {
+        session_cwd = row.get("cwd").ok().filter(|c: &String| !c.is_empty());
+        if !force {
             let enriched: Option<String> = row.get("enriched_at").ok();
             let deep: Option<String> = row.get("deep_at").ok();
             if let (Some(e), Some(d)) = (enriched.as_ref(), deep.as_ref()) {
@@ -2009,11 +2100,23 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         }
     }
 
+    let vocab = if extraction.routing.enabled {
+        known_namespace_vocabulary(
+            namespace,
+            session_cwd.as_deref().map(Path::new),
+            &extraction.routing,
+        )
+    } else {
+        Vec::new()
+    };
+    let known = extraction.routing.enabled.then_some(vocab.as_slice());
+
     let (concepts, text_len) = match extract_concepts_for_session(
         &graph_conn,
         session_id,
         enrichment_text_budget(),
         enrichment_max_concepts(),
+        known,
     )
     .await
     {
@@ -2037,6 +2140,12 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
     println!("  extracted {} concept(s)", concepts.len());
 
     for concept in &concepts {
+        let target_ns = if extraction.routing.enabled {
+            route_namespace(concept.topic.as_deref(), namespace, &vocab)
+        } else {
+            namespace.to_string()
+        };
+
         let embedding = if let Some(ref client) = ollama {
             client
                 .embed(&format!("{}: {}", concept.name, concept.description))
@@ -2049,7 +2158,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         if let Err(e) = graph::add_concept(
             &graph_conn,
             &concept.name,
-            namespace,
+            &target_ns,
             Some(&concept.description),
             Some("session-enrichment"),
             None,
@@ -2065,7 +2174,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
         stats.concepts_created += 1;
 
         if let Err(e) =
-            graph::link_concept_to_session(&graph_conn, &concept.name, namespace, session_id, 1)
+            graph::link_concept_to_session(&graph_conn, &concept.name, &target_ns, session_id, 1)
                 .await
         {
             eprintln!("  failed to link concept {}: {e}", concept.name);
@@ -2073,7 +2182,14 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
             continue;
         }
         stats.concepts_linked += 1;
-        println!("  • {} — {}", concept.name, concept.description);
+        if extraction.routing.enabled && target_ns != namespace {
+            println!(
+                "  • [{target_ns}] {} — {}",
+                concept.name, concept.description
+            );
+        } else {
+            println!("  • {} — {}", concept.name, concept.description);
+        }
     }
 
     graph::mark_session_enriched(&graph_conn, session_id, stats.concepts_linked as i64).await?;
@@ -2089,6 +2205,7 @@ pub async fn enrich_session(session_id: &str, namespace: &str, force: bool) -> R
 pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Result<EnrichStats> {
     let graph_conn = graph::connect().await?;
     let semantic_config = config::SemanticConfig::load();
+    let extraction = config::ExtractionConfig::load();
     let ollama = embeddings::OllamaClient::from_config(&semantic_config);
 
     let session_ids = if force {
@@ -2098,7 +2215,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
                     "MATCH (s:Session)
                  WHERE s.deep_indexed_at IS NOT NULL
                    AND ($all_ns OR s.namespace IN $namespaces)
-                 RETURN s.session_id AS id, s.namespace AS ns
+                 RETURN s.session_id AS id, s.namespace AS ns, s.cwd AS cwd
                  ORDER BY s.deep_indexed_at DESC
                  LIMIT $limit",
                 )
@@ -2114,8 +2231,9 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
         while let Some(row) = result.next().await? {
             let id: String = row.get("id").unwrap_or_default();
             let ns: String = row.get("ns").unwrap_or_default();
+            let cwd: String = row.get("cwd").unwrap_or_default();
             if !id.is_empty() {
-                out.push((id, ns));
+                out.push((id, ns, cwd));
             }
         }
         out
@@ -2125,13 +2243,16 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
         for id in ids {
             let mut r = graph_conn
                 .execute(
-                    neo4rs::query("MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns")
-                        .param("id", id.as_str()),
+                    neo4rs::query(
+                        "MATCH (s:Session {session_id: $id}) RETURN s.namespace AS ns, s.cwd AS cwd",
+                    )
+                    .param("id", id.as_str()),
                 )
                 .await?;
             if let Some(row) = r.next().await? {
                 let ns: String = row.get("ns").unwrap_or_default();
-                out.push((id, ns));
+                let cwd: String = row.get("cwd").unwrap_or_default();
+                out.push((id, ns, cwd));
             }
         }
         out
@@ -2146,13 +2267,25 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
     let mut total = EnrichStats::default();
 
-    for (sid, ns) in &session_ids {
+    for (sid, ns, cwd) in &session_ids {
         let short = &sid[..8.min(sid.len())];
+        // Vocab is scoped to THIS session's own namespace ancestry (+ allow-list),
+        // recomputed per session because a batch may span namespaces. Anchored
+        // on the session's own recorded cwd, not the operator's, since a batch
+        // run's invoking process may sit in an unrelated directory.
+        let session_cwd = (!cwd.is_empty()).then(|| Path::new(cwd.as_str()));
+        let vocab = if extraction.routing.enabled {
+            known_namespace_vocabulary(ns, session_cwd, &extraction.routing)
+        } else {
+            Vec::new()
+        };
+        let known = extraction.routing.enabled.then_some(vocab.as_slice());
         let (concepts, text_len) = match extract_concepts_for_session(
             &graph_conn,
             sid,
             enrichment_text_budget(),
             enrichment_max_concepts(),
+            known,
         )
         .await
         {
@@ -2171,6 +2304,12 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
 
         let mut linked = 0u32;
         for concept in &concepts {
+            let target_ns = if extraction.routing.enabled {
+                route_namespace(concept.topic.as_deref(), ns, &vocab)
+            } else {
+                ns.clone()
+            };
+
             let embedding = if let Some(ref client) = ollama {
                 client
                     .embed(&format!("{}: {}", concept.name, concept.description))
@@ -2182,7 +2321,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
             let added = graph::add_concept(
                 &graph_conn,
                 &concept.name,
-                ns,
+                &target_ns,
                 Some(&concept.description),
                 Some("session-enrichment"),
                 None,
@@ -2195,7 +2334,7 @@ pub async fn enrich_all(namespaces: &[String], limit: usize, force: bool) -> Res
                 continue;
             }
             total.concepts_created += 1;
-            if graph::link_concept_to_session(&graph_conn, &concept.name, ns, sid, 1)
+            if graph::link_concept_to_session(&graph_conn, &concept.name, &target_ns, sid, 1)
                 .await
                 .is_ok()
             {
@@ -2436,5 +2575,186 @@ mod enrichment_tests {
         assert!(text.contains("src/sessions.rs"));
         assert!(text.contains("let's optimize"));
         assert!(text.len() <= 8_000);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod route_namespace_tests {
+    use super::{known_namespace_vocabulary, route_namespace};
+    use crate::config::RoutingConfig;
+
+    /// The controlled set a session may route into: its own ancestry
+    /// (self `reserve-padel` + parent `solution-architect` + `global`) plus
+    /// one explicitly allow-listed cross-cutting bucket (`reference`). Never
+    /// contains a peer project namespace (`homeschool`, `some-other-client`).
+    fn allowed() -> Vec<String> {
+        vec![
+            "reserve-padel".to_string(),
+            "solution-architect".to_string(),
+            "global".to_string(),
+            "reference".to_string(),
+        ]
+    }
+
+    #[test]
+    fn no_topic_falls_back_to_source() {
+        assert_eq!(
+            route_namespace(None, "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+        assert_eq!(
+            route_namespace(Some(""), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+        assert_eq!(
+            route_namespace(Some("   "), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+    }
+
+    #[test]
+    fn topic_naming_own_source_namespace_routes_there() {
+        assert_eq!(
+            route_namespace(Some("reserve-padel"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+    }
+
+    #[test]
+    fn topic_naming_a_parent_namespace_routes_there() {
+        // "which of MY ancestor buckets does this belong in": a concept the
+        // classifier tags with the parent namespace is written into the parent,
+        // which is already searched via the ancestry walk.
+        assert_eq!(
+            route_namespace(Some("solution-architect"), "reserve-padel", &allowed()),
+            "solution-architect"
+        );
+        assert_eq!(
+            route_namespace(Some("global"), "reserve-padel", &allowed()),
+            "global"
+        );
+    }
+
+    #[test]
+    fn topic_naming_an_allow_listed_bucket_routes_there() {
+        assert_eq!(
+            route_namespace(Some("reference"), "reserve-padel", &allowed()),
+            "reference"
+        );
+    }
+
+    #[test]
+    fn cross_project_write_is_impossible_by_construction() {
+        // THE core guarantee Doug required. A session in `reserve-padel` whose
+        // conversation drifted toward another client cannot route a concept into
+        // that peer project's namespace: a topic naming a NON-ancestor,
+        // non-allow-listed namespace falls back to the source, never the peer.
+        assert_eq!(
+            route_namespace(Some("homeschool"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+        assert_eq!(
+            route_namespace(Some("some-other-client"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+        // Even an arbitrary freshly-invented label cannot mint outside ancestry.
+        assert_eq!(
+            route_namespace(Some("brand-new-topic"), "reserve-padel", &allowed()),
+            "reserve-padel"
+        );
+    }
+
+    #[test]
+    fn allowed_match_is_case_insensitive_and_returns_canonical_form() {
+        // The classifier may upper-case; we snap to the canonical stored form.
+        assert_eq!(
+            route_namespace(Some("SOLUTION-ARCHITECT"), "reserve-padel", &allowed()),
+            "solution-architect"
+        );
+        assert_eq!(
+            route_namespace(Some("Reference"), "reserve-padel", &allowed()),
+            "reference"
+        );
+    }
+
+    #[test]
+    fn empty_allowed_set_always_falls_back_to_source() {
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            route_namespace(Some("solution-architect"), "reserve-padel", &empty),
+            "reserve-padel"
+        );
+        assert_eq!(
+            route_namespace(Some("anything"), "reserve-padel", &empty),
+            "reserve-padel"
+        );
+    }
+
+    #[test]
+    fn vocabulary_is_scoped_to_ancestry_plus_allowlist_never_peers() {
+        // `known_namespace_vocabulary` for a namespace not resolvable on disk
+        // falls back to [self, global]; the configured allow-list is merged in,
+        // but no arbitrary peer namespace ever appears (there is no whole-graph
+        // source anymore). This is the vocab half of the same guarantee.
+        let routing = RoutingConfig {
+            enabled: true,
+            known_namespaces: vec!["reference".to_string()],
+        };
+        let vocab = known_namespace_vocabulary("reserve-padel-unresolved-xyz", None, &routing);
+        assert!(vocab.iter().any(|n| n == "reserve-padel-unresolved-xyz"));
+        assert!(vocab.iter().any(|n| n == "global"));
+        assert!(vocab.iter().any(|n| n == "reference"));
+        // A peer project the classifier might name is NOT offered as vocab.
+        assert!(!vocab.iter().any(|n| n == "homeschool"));
+    }
+
+    #[test]
+    fn vocabulary_anchors_on_session_cwd_not_process_cwd() {
+        // A batch enrich run (or `--session <id>`) invokes this from wherever
+        // the operator happens to be, not from the session's own project
+        // directory. The ancestry walk must anchor on the session's recorded
+        // `cwd`, not `std::env::current_dir()`, or a parent namespace
+        // configured on disk silently drops out of the vocab.
+        let root = std::env::temp_dir().join(format!("c0-vocab-cwd-anchor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("reserve-padel-cwd-anchor-test");
+        std::fs::create_dir_all(project.join(".c0")).expect("create .c0");
+        std::fs::write(
+            project.join(".c0/config.toml"),
+            "namespace = \"reserve-padel-cwd-anchor-test\"\nparent_namespace = \"solution-architect-cwd-anchor-test\"\n",
+        )
+        .expect("write config");
+
+        let routing = RoutingConfig {
+            enabled: true,
+            known_namespaces: Vec::new(),
+        };
+
+        // Anchored on the session's own cwd: the parent configured on disk
+        // is found and joins the ancestry.
+        let vocab = known_namespace_vocabulary(
+            "reserve-padel-cwd-anchor-test",
+            Some(project.as_path()),
+            &routing,
+        );
+        assert!(
+            vocab
+                .iter()
+                .any(|n| n == "solution-architect-cwd-anchor-test")
+        );
+
+        // No session cwd (falls back to this test process's own cwd, which is
+        // nowhere near the scratch project): the `.c0` config is never found,
+        // so the parent is silently absent from the vocab.
+        let vocab_unanchored =
+            known_namespace_vocabulary("reserve-padel-cwd-anchor-test", None, &routing);
+        assert!(
+            !vocab_unanchored
+                .iter()
+                .any(|n| n == "solution-architect-cwd-anchor-test")
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
