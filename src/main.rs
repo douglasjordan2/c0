@@ -872,6 +872,10 @@ fn log_dead_end(command: &str, query: &str, namespace: &str, context: Option<&st
         let inbox_dir = home.join(".c0/reflector");
         if std::fs::create_dir_all(&inbox_dir).is_ok() {
             let inbox_file = inbox_dir.join("inbox.jsonl");
+            let existing = std::fs::read_to_string(&inbox_file).unwrap_or_default();
+            if inbox_has_dead_end(&existing, query, namespace) {
+                return;
+            }
             let entry = serde_json::json!({
                 "timestamp": chrono::Utc::now().to_rfc3339(),
                 "session": session_id,
@@ -889,6 +893,24 @@ fn log_dead_end(command: &str, query: &str, namespace: &str, context: Option<&st
             }
         }
     }
+}
+
+fn inbox_has_dead_end(inbox: &str, query: &str, namespace: &str) -> bool {
+    let wanted = query.trim().to_lowercase();
+    inbox
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|entry| {
+            let same_query = entry
+                .get("query")
+                .and_then(|v| v.as_str())
+                .is_some_and(|q| q.trim().to_lowercase() == wanted);
+            let same_namespace = entry
+                .get("namespace")
+                .and_then(|v| v.as_str())
+                .is_some_and(|ns| ns == namespace);
+            same_query && same_namespace
+        })
 }
 
 fn cmd_kind(c: &Commands) -> &'static str {
@@ -3310,12 +3332,21 @@ async fn main() -> Result<()> {
                     let inbox_dir = home.join(".c0/reflector");
                     if std::fs::create_dir_all(&inbox_dir).is_ok() {
                         let inbox_file = inbox_dir.join("inbox.jsonl");
+                        let existing = std::fs::read_to_string(&inbox_file).unwrap_or_default();
                         if let Ok(mut f) = std::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(inbox_file)
                         {
+                            let mut written: Vec<String> = Vec::new();
                             for concept in &unknown_concepts {
+                                let key = concept.trim().to_lowercase();
+                                if written.contains(&key)
+                                    || inbox_has_dead_end(&existing, concept, &ctx.namespace)
+                                {
+                                    continue;
+                                }
+                                written.push(key);
                                 let entry = serde_json::json!({
                                     "timestamp": chrono::Utc::now().to_rfc3339(),
                                     "session": session_id,
@@ -3326,7 +3357,7 @@ async fn main() -> Result<()> {
                                 });
                                 let _ = writeln!(f, "{entry}");
                             }
-                            true
+                            !written.is_empty()
                         } else {
                             false
                         }
@@ -3706,7 +3737,31 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_use_semantic;
+    use super::{inbox_has_dead_end, should_use_semantic};
+
+    #[test]
+    fn repeated_dead_end_is_detected_case_and_whitespace_insensitively() {
+        let inbox = concat!(
+            r#"{"query":"Voltr","namespace":"global","command":"walk"}"#,
+            "\n",
+            r#"{"query":"tiktok-shop","namespace":"voltr","command":"extract-concepts"}"#,
+            "\n",
+        );
+        assert!(inbox_has_dead_end(inbox, "voltr", "global"));
+        assert!(inbox_has_dead_end(inbox, " tiktok-shop ", "voltr"));
+    }
+
+    #[test]
+    fn different_namespace_new_query_or_empty_inbox_is_not_a_repeat() {
+        let inbox = concat!(
+            r#"{"query":"voltr","namespace":"voltr"}"#,
+            "\n",
+            "not json at all\n",
+        );
+        assert!(!inbox_has_dead_end(inbox, "voltr", "global"));
+        assert!(!inbox_has_dead_end(inbox, "spiffy", "voltr"));
+        assert!(!inbox_has_dead_end("", "voltr", "voltr"));
+    }
 
     #[test]
     fn short_hyphenated_identifiers_reach_semantic() {
