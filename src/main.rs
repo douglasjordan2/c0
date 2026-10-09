@@ -19,6 +19,17 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+pub(crate) fn truncate_display(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
 fn parse_date_to_datetime(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
         return Ok(dt.with_timezone(&Utc));
@@ -1999,11 +2010,7 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .filter(|s| !s.is_empty())
                         .unwrap_or(&session.first_prompt);
-                    let snippet = if display.len() > 90 {
-                        format!("{}...", &display[..90])
-                    } else {
-                        display.to_string()
-                    };
+                    let snippet = truncate_display(display, 93);
                     let mention = if *count > 1 {
                         format!(" ×{count}")
                     } else {
@@ -3640,11 +3647,7 @@ async fn main() -> Result<()> {
                 println!("{}", "─".repeat(80));
                 for r in &results {
                     let desc = r.description.as_deref().unwrap_or("");
-                    let desc_truncated = if desc.len() > 40 {
-                        format!("{}...", &desc[..37])
-                    } else {
-                        desc.to_string()
-                    };
+                    let desc_truncated = truncate_display(desc, 40);
                     if vector_only {
                         println!(
                             "{:<6.0}% {:<16} {:<30} {}",
@@ -3706,7 +3709,37 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_use_semantic;
+    use super::{should_use_semantic, truncate_display};
+
+    #[test]
+    fn truncate_display_returns_short_strings_unchanged() {
+        assert_eq!(truncate_display("short", 40), "short");
+        assert_eq!(truncate_display("", 40), "");
+        let exact = "x".repeat(40);
+        assert_eq!(truncate_display(&exact, 40), exact);
+    }
+
+    #[test]
+    fn truncate_display_cuts_ascii_and_appends_ellipsis() {
+        let s = "a".repeat(50);
+        let out = truncate_display(&s, 40);
+        assert_eq!(out, format!("{}...", "a".repeat(37)));
+        assert_eq!(out.len(), 40);
+    }
+
+    #[test]
+    fn truncate_display_never_splits_a_multibyte_char() {
+        let s = "一个用于捕捉报告用户原因的v1版本提示界面，暂时复用chat_report表结构。";
+        let out = truncate_display(s, 40);
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 40);
+        assert!(s.starts_with(out.trim_end_matches("...")));
+        let mixed = "ab€€€€€€€€€€€€€€€€€€";
+        for max in 3..mixed.len() + 3 {
+            let out = truncate_display(mixed, max);
+            assert!(out.len() <= max.max(3), "max={max} out={out:?}");
+        }
+    }
 
     #[test]
     fn short_hyphenated_identifiers_reach_semantic() {

@@ -466,6 +466,18 @@ fn targets_patch(rel_type: &str) -> bool {
     PATCH_TARGET_RELS.contains(&rel_type)
 }
 
+pub(crate) fn split_qualified<'a>(name: &'a str, default: &[String]) -> (&'a str, Vec<String>) {
+    if let Some((ns, bare)) = name.split_once(':')
+        && !ns.is_empty()
+        && !bare.is_empty()
+        && !ns.chars().any(char::is_whitespace)
+        && !bare.starts_with(char::is_whitespace)
+    {
+        return (bare, vec![ns.to_string()]);
+    }
+    (name, default.to_vec())
+}
+
 pub async fn relate(
     graph: &Graph,
     from: &str,
@@ -475,27 +487,31 @@ pub async fn relate(
 ) -> Result<()> {
     validate_rel_type(rel_type)?;
 
+    let (from_name, from_ns) = split_qualified(from, namespaces);
+    let (to_name, to_ns) = split_qualified(to, namespaces);
+
     // Use MERGE, not CREATE: running the same `relate` twice (the normal
     // hook/script usage mode) must not accrete duplicate edges.
     let cypher = if targets_patch(rel_type) {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:KnowledgePatch {{name: $to}}) \
-             WHERE a.namespace IN $namespaces AND (b.namespace IS NULL OR b.namespace IN $namespaces) \
+             WHERE a.namespace IN $from_ns AND (b.namespace IS NULL OR b.namespace IN $to_ns) \
              MERGE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
         )
     } else {
         format!(
             "MATCH (a:Concept {{name: $from}}), (b:Concept {{name: $to}}) \
-             WHERE a.namespace IN $namespaces AND b.namespace IN $namespaces \
+             WHERE a.namespace IN $from_ns AND b.namespace IN $to_ns \
              MERGE (a)-[:{rel_type}]->(b) RETURN count(*) AS created"
         )
     };
     let mut result = graph
         .execute(
             query(&cypher)
-                .param("from", from)
-                .param("to", to)
-                .param("namespaces", namespaces.to_vec()),
+                .param("from", from_name)
+                .param("to", to_name)
+                .param("from_ns", from_ns.clone())
+                .param("to_ns", to_ns.clone()),
         )
         .await?;
 
@@ -511,8 +527,9 @@ pub async fn relate(
         };
         return Err(anyhow!(
             "Could not create relationship '{from}' -[{rel_type}]-> '{to}': \
-             the source concept and/or target {target_kind} was not found in \
-             namespaces {namespaces:?}. Create both first (e.g. `c0 add concept`)."
+             the source concept was not found in namespaces {from_ns:?} and/or the \
+             target {target_kind} was not found in namespaces {to_ns:?}. Create both \
+             first (e.g. `c0 add concept`), or qualify an endpoint as `<namespace>:<name>`."
         ));
     }
     Ok(())
@@ -4009,6 +4026,33 @@ mod tests {
     fn scores_are_clamped_to_one() {
         let fused = reciprocal_rank_fusion("q", &[result("alpha")], &[result("alpha")], 0.4, 60.0);
         assert!(fused.iter().all(|r| r.similarity <= 1.0));
+    }
+
+    #[test]
+    fn split_qualified_uses_context_namespaces_for_bare_names() {
+        let ctx = vec!["tumble".to_string(), "global".to_string()];
+        assert_eq!(split_qualified("supaeasy", &ctx), ("supaeasy", ctx.clone()));
+    }
+
+    #[test]
+    fn split_qualified_resolves_namespace_prefix() {
+        let ctx = vec!["global".to_string()];
+        assert_eq!(
+            split_qualified("tumble:supaeasy-discount", &ctx),
+            ("supaeasy-discount", vec!["tumble".to_string()])
+        );
+        assert_eq!(
+            split_qualified("solution-architect:sa-process", &ctx),
+            ("sa-process", vec!["solution-architect".to_string()])
+        );
+    }
+
+    #[test]
+    fn split_qualified_leaves_names_with_odd_colons_alone() {
+        let ctx = vec!["global".to_string()];
+        for name in [":leading", "trailing:", "has space:x", "label: text"] {
+            assert_eq!(split_qualified(name, &ctx), (name, ctx.clone()), "{name}");
+        }
     }
 
     #[test]
