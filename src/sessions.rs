@@ -1290,6 +1290,12 @@ pub async fn extract_session(
     Ok(stats)
 }
 
+const EXTRACT_CHECKPOINT_EVERY: u32 = 25;
+
+fn checkpoint_due(sessions_extracted: u32) -> bool {
+    sessions_extracted > 0 && sessions_extracted % EXTRACT_CHECKPOINT_EVERY == 0
+}
+
 pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractStats> {
     let projects_dir = get_projects_dir();
     if !projects_dir.exists() {
@@ -1317,7 +1323,6 @@ pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractSt
     for entry in &dirs {
         let dir_name = entry.file_name().to_string_lossy().to_string();
         let namespace = derive_namespace(&dir_name);
-        let dir_state = state.dirs.entry(dir_name.clone()).or_default();
 
         let jsonl_files: Vec<_> = match std::fs::read_dir(entry.path()) {
             Ok(rd) => rd
@@ -1339,7 +1344,11 @@ pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractSt
             }
 
             let current_mtime = file_mtime_ms(&path);
-            let stored_mtime = dir_state.sessions.get(&session_id).copied();
+            let stored_mtime = state
+                .dirs
+                .get(&dir_name)
+                .and_then(|d| d.sessions.get(&session_id))
+                .copied();
 
             if !force && stored_mtime == current_mtime && current_mtime.is_some() {
                 stats.sessions_skipped += 1;
@@ -1362,9 +1371,17 @@ pub async fn extract_all(force: bool, skip_sidechains: bool) -> Result<ExtractSt
                         Ok(()) => {
                             stats.sessions_extracted += 1;
                             if let Some(m) = current_mtime {
-                                dir_state.sessions.insert(session_id, m);
+                                state
+                                    .dirs
+                                    .entry(dir_name.clone())
+                                    .or_default()
+                                    .sessions
+                                    .insert(session_id, m);
                             }
                             println!("✓");
+                            if checkpoint_due(stats.sessions_extracted) {
+                                save_turns_state(&state)?;
+                            }
                         }
                         Err(e) => {
                             stats.errors += 1;
@@ -2756,5 +2773,20 @@ mod route_namespace_tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::checkpoint_due;
+
+    #[test]
+    fn checkpoints_every_batch_and_never_at_zero() {
+        assert!(!checkpoint_due(0));
+        assert!(!checkpoint_due(1));
+        assert!(!checkpoint_due(24));
+        assert!(checkpoint_due(25));
+        assert!(!checkpoint_due(26));
+        assert!(checkpoint_due(50));
     }
 }
