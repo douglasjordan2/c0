@@ -1,8 +1,8 @@
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -12,22 +12,184 @@ use crate::config::SemanticConfig;
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
+const INBOX_FILE: &str = "inbox.jsonl";
+const CLAIMED_FILE: &str = "inbox.processing.jsonl";
+const REVIEW_FILE: &str = "review.jsonl";
+const PENDING_FILE: &str = "pending-commits.jsonl";
+const LOCK_FILE: &str = "reflector.lock";
+
 fn reflector_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".c0/reflector")
 }
 
+fn lock_dir(dir: &Path) -> Result<fs::File> {
+    fs::create_dir_all(dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(LOCK_FILE))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn read_or_empty(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn non_empty_lines(content: &str) -> impl Iterator<Item = &str> {
+    content.lines().filter(|l| !l.trim().is_empty())
+}
+
+fn count_lines(path: &Path) -> usize {
+    read_or_empty(path)
+        .map(|c| non_empty_lines(&c).count())
+        .unwrap_or(0)
+}
+
+fn join_lines<S: AsRef<str>>(lines: &[S]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(line.as_ref().trim_end_matches('\n'));
+        out.push('\n');
+    }
+    out
+}
+
+fn append_unlocked<S: AsRef<str>>(path: &Path, lines: &[S]) -> Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(join_lines(lines).as_bytes())?;
+    Ok(())
+}
+
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, content)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn append_lines(dir: &Path, file: &str, lines: &[String]) -> Result<()> {
+    let _lock = lock_dir(dir)?;
+    append_unlocked(&dir.join(file), lines)
+}
+
+fn remove_lines(dir: &Path, file: &str, handled: &[String]) -> Result<usize> {
+    let _lock = lock_dir(dir)?;
+    let path = dir.join(file);
+    let current = read_or_empty(&path)?;
+
+    let mut to_remove: HashMap<&str, usize> = HashMap::new();
+    for line in handled {
+        *to_remove.entry(line.as_str()).or_insert(0) += 1;
+    }
+
+    let kept: Vec<&str> = non_empty_lines(&current)
+        .filter(|line| match to_remove.get_mut(line) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect();
+
+    write_atomic(&path, &join_lines(&kept))?;
+    Ok(kept.len())
+}
+
+fn with_inbox_in<T>(dir: &Path, f: impl FnOnce(&str, &mut fs::File) -> T) -> Result<T> {
+    let _lock = lock_dir(dir)?;
+    let mut existing = read_or_empty(&dir.join(INBOX_FILE))?;
+    existing.push_str(&read_or_empty(&dir.join(CLAIMED_FILE))?);
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(INBOX_FILE))?;
+    Ok(f(&existing, &mut file))
+}
+
+pub fn with_inbox<T>(f: impl FnOnce(&str, &mut fs::File) -> T) -> Result<T> {
+    with_inbox_in(&reflector_dir(), f)
+}
+
+fn claim_inbox_in(dir: &Path) -> Result<Vec<String>> {
+    let _lock = lock_dir(dir)?;
+    let inbox = dir.join(INBOX_FILE);
+    let claimed = dir.join(CLAIMED_FILE);
+
+    let incoming = read_or_empty(&inbox)?;
+    let incoming: Vec<&str> = non_empty_lines(&incoming).collect();
+    if !incoming.is_empty() {
+        append_unlocked(&claimed, &incoming)?;
+        fs::write(&inbox, "")?;
+    }
+
+    Ok(non_empty_lines(&read_or_empty(&claimed)?)
+        .map(String::from)
+        .collect())
+}
+
+fn release_claim_in(dir: &Path) -> Result<()> {
+    let _lock = lock_dir(dir)?;
+    match fs::remove_file(dir.join(CLAIMED_FILE)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn claim() -> Result<()> {
+    let lines = claim_inbox_in(&ensure_dir()?)?;
+    if lines.is_empty() {
+        eprintln!("Inbox is empty.");
+    }
+    for line in &lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub fn release() -> Result<()> {
+    release_claim_in(&ensure_dir()?)?;
+    eprintln!("Released claimed batch.");
+    Ok(())
+}
+
+pub fn enqueue_review() -> Result<()> {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+
+    let mut lines: Vec<String> = Vec::new();
+    for (i, line) in non_empty_lines(&input).enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            anyhow::anyhow!("line {} is not valid JSON ({e}); nothing queued", i + 1)
+        })?;
+        lines.push(serde_json::to_string(&value)?);
+    }
+
+    append_lines(&ensure_dir()?, REVIEW_FILE, &lines)?;
+    println!("Queued {} item(s) for review.", lines.len());
+    Ok(())
+}
+
 fn ensure_dir() -> Result<PathBuf> {
     let dir = reflector_dir();
     fs::create_dir_all(&dir)?;
 
-    for file in &[
-        "inbox.jsonl",
-        "proposed.jsonl",
-        "review.jsonl",
-        "pending-commits.jsonl",
-    ] {
+    for file in &[INBOX_FILE, "proposed.jsonl", REVIEW_FILE, PENDING_FILE] {
         let path = dir.join(file);
         if !path.exists() {
             fs::write(&path, "")?;
@@ -44,43 +206,16 @@ pub fn status() -> Result<()> {
     println!("═══════════════════════════════════════");
     println!("Directory: {}", dir.display());
 
-    let inbox_path = dir.join("inbox.jsonl");
-    let inbox_count = if inbox_path.exists() {
-        fs::read_to_string(&inbox_path)
-            .map(|c| c.lines().filter(|l| !l.is_empty()).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let proposed_path = dir.join("proposed.jsonl");
-    let proposed_count = if proposed_path.exists() {
-        fs::read_to_string(&proposed_path)
-            .map(|c| c.lines().filter(|l| !l.is_empty()).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let review_path = dir.join("review.jsonl");
-    let review_count = if review_path.exists() {
-        fs::read_to_string(&review_path)
-            .map(|c| c.lines().filter(|l| !l.is_empty()).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let pending_path = dir.join("pending-commits.jsonl");
-    let pending_count = if pending_path.exists() {
-        fs::read_to_string(&pending_path)
-            .map(|c| c.lines().filter(|l| !l.is_empty()).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let inbox_count = count_lines(&dir.join(INBOX_FILE));
+    let claimed_count = count_lines(&dir.join(CLAIMED_FILE));
+    let proposed_count = count_lines(&dir.join("proposed.jsonl"));
+    let review_count = count_lines(&dir.join(REVIEW_FILE));
+    let pending_count = count_lines(&dir.join(PENDING_FILE));
 
     println!("Inbox: {inbox_count} dead end(s)");
+    if claimed_count > 0 {
+        println!("Claimed (being processed or interrupted): {claimed_count} dead end(s)");
+    }
     println!("Proposed: {proposed_count} learning(s)");
     println!("Review queue: {review_count} item(s)");
     println!("Pending commits: {pending_count} concept(s)");
@@ -174,8 +309,9 @@ pub fn proposed() -> Result<()> {
 
 pub fn clear() -> Result<()> {
     let dir = reflector_dir();
+    let _lock = lock_dir(&dir)?;
 
-    let inbox_path = dir.join("inbox.jsonl");
+    let inbox_path = dir.join(INBOX_FILE);
     let proposed_path = dir.join("proposed.jsonl");
 
     let mut cleared = 0;
@@ -211,10 +347,8 @@ pub fn clear() -> Result<()> {
 
 pub fn review() -> Result<()> {
     let dir = ensure_dir()?;
-    let review_path = dir.join("review.jsonl");
-
-    let content = fs::read_to_string(&review_path)?;
-    let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    let content = read_or_empty(&dir.join(REVIEW_FILE))?;
+    let lines: Vec<&str> = non_empty_lines(&content).collect();
 
     if lines.is_empty() {
         println!("Review queue is empty. No uncertain items from ghost.");
@@ -225,8 +359,7 @@ pub fn review() -> Result<()> {
     println!("═══════════════════════════════════════");
     println!();
 
-    let mut remaining_lines: Vec<String> = Vec::new();
-    let mut processed = 0;
+    let mut handled: Vec<String> = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
         if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
@@ -254,42 +387,29 @@ pub fn review() -> Result<()> {
             match choice.as_str() {
                 "c" | "commit" => {
                     println!("   → Run: c0 add concept {query}");
-                    processed += 1;
+                    handled.push(line.to_string());
                 }
                 "s" | "skip" => {
                     println!("   → Skipped (keeping in queue)");
-                    remaining_lines.push(line.to_string());
                 }
                 "q" | "quit" => {
-                    for remaining in &lines[i..] {
-                        remaining_lines.push(remaining.to_string());
-                    }
                     break;
                 }
                 _ => {
                     println!("   → Unknown choice, keeping in queue");
-                    remaining_lines.push(line.to_string());
                 }
             }
             println!();
-        } else {
-            remaining_lines.push(line.to_string());
         }
     }
 
-    let new_content = remaining_lines.join("\n");
-    let new_content = if new_content.is_empty() {
-        String::new()
-    } else {
-        format!("{new_content}\n")
-    };
-    fs::write(&review_path, new_content)?;
+    let remaining = remove_lines(&dir, REVIEW_FILE, &handled)?;
 
     println!("═══════════════════════════════════════");
     println!(
         "Processed {} item(s). {} remaining in queue.",
-        processed,
-        remaining_lines.len()
+        handled.len(),
+        remaining
     );
 
     Ok(())
@@ -297,10 +417,8 @@ pub fn review() -> Result<()> {
 
 pub fn apply() -> Result<()> {
     let dir = ensure_dir()?;
-    let pending_path = dir.join("pending-commits.jsonl");
-
-    let content = fs::read_to_string(&pending_path)?;
-    let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    let content = read_or_empty(&dir.join(PENDING_FILE))?;
+    let lines: Vec<&str> = non_empty_lines(&content).collect();
 
     if lines.is_empty() {
         println!("No pending commits from ghost.");
@@ -310,86 +428,80 @@ pub fn apply() -> Result<()> {
     println!("Applying {} pending commit(s) from ghost:", lines.len());
     println!("═══════════════════════════════════════");
 
-    let mut applied = 0;
-    let mut failed: Vec<String> = Vec::new();
+    let mut applied: Vec<String> = Vec::new();
 
     for line in &lines {
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            let concept = entry.get("concept").and_then(|v| v.as_str()).unwrap_or("");
-            let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-
-            if concept.is_empty() {
-                continue;
-            }
-
-            println!("  Adding: {concept}");
-            if !reason.is_empty() {
-                println!("  Reason: {reason}");
-            }
-
-            // Pass --force so the fuzzy-duplicate guard in `add concept` can't
-            // silently skip the concept the classifier already decided to COMMIT.
-            // --quiet suppresses suggestion noise. --source reflector stamps
-            // provenance so the reflector's output can be audited (otherwise it
-            // is indistinguishable from manual adds). Pass the reason as the
-            // description so the new node gets an embedding and is retrievable.
-            let mut args: Vec<&str> = vec![
-                "add",
-                "concept",
-                concept,
-                "--force",
-                "--quiet",
-                "--source",
-                "reflector",
-            ];
-            if !reason.is_empty() {
-                args.push("-d");
-                args.push(reason);
-            }
-            // Invoke this same binary by absolute path rather than relying on `c0`
-            // being on $PATH — under systemd the daemon's $PATH often lacks the
-            // user's cargo bin dir, which silently breaks every commit.
-            let exe = std::env::current_exe().unwrap_or_else(|_| "c0".into());
-            let result = Command::new(exe).args(&args).output();
-
-            match result {
-                Ok(output) if output.status.success() => {
-                    println!("  → Created");
-                    applied += 1;
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if stdout.contains("already exists") || stderr.contains("already exists") {
-                        println!("  → Already exists");
-                        applied += 1;
-                    } else {
-                        println!("  → Failed: {}", stderr.trim());
-                        failed.push(line.to_string());
-                    }
-                }
-                Err(e) => {
-                    println!("  → Error: {e}");
-                    failed.push(line.to_string());
-                }
-            }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            println!("  Skipping malformed line (kept in queue): {line}");
             println!();
+            continue;
+        };
+        let concept = entry.get("concept").and_then(|v| v.as_str()).unwrap_or("");
+        let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+        if concept.is_empty() {
+            println!("  Skipping entry with no concept (kept in queue): {line}");
+            println!();
+            continue;
         }
+
+        println!("  Adding: {concept}");
+        if !reason.is_empty() {
+            println!("  Reason: {reason}");
+        }
+
+        // Pass --force so the fuzzy-duplicate guard in `add concept` can't
+        // silently skip the concept the classifier already decided to COMMIT.
+        // --quiet suppresses suggestion noise. --source reflector stamps
+        // provenance so the reflector's output can be audited (otherwise it
+        // is indistinguishable from manual adds). Pass the reason as the
+        // description so the new node gets an embedding and is retrievable.
+        let mut args: Vec<&str> = vec![
+            "add",
+            "concept",
+            concept,
+            "--force",
+            "--quiet",
+            "--source",
+            "reflector",
+        ];
+        if !reason.is_empty() {
+            args.push("-d");
+            args.push(reason);
+        }
+        // Invoke this same binary by absolute path rather than relying on `c0`
+        // being on $PATH — under systemd the daemon's $PATH often lacks the
+        // user's cargo bin dir, which silently breaks every commit.
+        let exe = std::env::current_exe().unwrap_or_else(|_| "c0".into());
+        let result = Command::new(exe).args(&args).output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                println!("  → Created");
+                applied.push(line.to_string());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("already exists") || stderr.contains("already exists") {
+                    println!("  → Already exists");
+                    applied.push(line.to_string());
+                } else {
+                    println!("  → Failed: {}", stderr.trim());
+                }
+            }
+            Err(e) => {
+                println!("  → Error: {e}");
+            }
+        }
+        println!();
     }
 
-    let new_content = if failed.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", failed.join("\n"))
-    };
-    fs::write(&pending_path, new_content)?;
+    let applied_count = applied.len();
+    let remaining = remove_lines(&dir, PENDING_FILE, &applied)?;
 
     println!("═══════════════════════════════════════");
-    println!(
-        "Applied {} concept(s). {} failed (kept in queue).",
-        applied,
-        failed.len()
-    );
+    println!("Applied {applied_count} concept(s). {remaining} kept in queue.");
 
     Ok(())
 }
@@ -596,18 +708,9 @@ async fn classify_query(
 
 pub async fn process() -> Result<()> {
     let dir = ensure_dir()?;
-    let inbox_path = dir.join("inbox.jsonl");
-    let pending_path = dir.join("pending-commits.jsonl");
-    let review_path = dir.join("review.jsonl");
     let log_path = dir.join("process.log");
 
-    if !inbox_path.exists() {
-        println!("No inbox.jsonl found.");
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&inbox_path)?;
-    let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    let lines = claim_inbox_in(&dir)?;
 
     if lines.is_empty() {
         println!("Inbox is empty.");
@@ -708,25 +811,17 @@ pub async fn process() -> Result<()> {
         }
     }
 
-    if !commits.is_empty() {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&pending_path)?;
-        for record in &commits {
-            writeln!(file, "{}", serde_json::to_string(record)?)?;
-        }
-    }
+    let commit_lines = commits
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?;
+    append_lines(&dir, PENDING_FILE, &commit_lines)?;
 
-    if !queued.is_empty() {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&review_path)?;
-        for record in &queued {
-            writeln!(file, "{}", serde_json::to_string(record)?)?;
-        }
-    }
+    let queued_lines = queued
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?;
+    append_lines(&dir, REVIEW_FILE, &queued_lines)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let log_entry = serde_json::json!({
@@ -742,7 +837,7 @@ pub async fn process() -> Result<()> {
         .open(&log_path)?;
     writeln!(log_file, "{}", serde_json::to_string(&log_entry)?)?;
 
-    fs::write(&inbox_path, "")?;
+    release_claim_in(&dir)?;
 
     println!("═══════════════════════════════════════");
     println!(
@@ -868,4 +963,135 @@ pub async fn notify() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "c0-reflector-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn claim_moves_inbox_into_batch_and_keeps_interrupted_leftovers() {
+        let dir = scratch("claim");
+        fs::write(dir.join(CLAIMED_FILE), "{\"query\":\"left\"}\n").unwrap();
+        fs::write(dir.join(INBOX_FILE), "{\"query\":\"new\"}\n\n").unwrap();
+
+        let batch = claim_inbox_in(&dir).unwrap();
+
+        assert_eq!(batch, vec!["{\"query\":\"left\"}", "{\"query\":\"new\"}"]);
+        assert_eq!(fs::read_to_string(dir.join(INBOX_FILE)).unwrap(), "");
+
+        release_claim_in(&dir).unwrap();
+        assert!(!dir.join(CLAIMED_FILE).exists());
+        release_claim_in(&dir).unwrap();
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_lines_preserves_entries_appended_after_the_snapshot() {
+        let dir = scratch("remove");
+        fs::write(dir.join(REVIEW_FILE), "a\nb\n").unwrap();
+
+        let snapshot = read_or_empty(&dir.join(REVIEW_FILE)).unwrap();
+        let handled: Vec<String> = non_empty_lines(&snapshot)
+            .filter(|l| *l == "a")
+            .map(String::from)
+            .collect();
+        append_lines(&dir, REVIEW_FILE, &["c".to_string()]).unwrap();
+
+        let remaining = remove_lines(&dir, REVIEW_FILE, &handled).unwrap();
+
+        assert_eq!(remaining, 2);
+        assert_eq!(fs::read_to_string(dir.join(REVIEW_FILE)).unwrap(), "b\nc\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_lines_drops_one_occurrence_per_handled_entry() {
+        let dir = scratch("dupes");
+        fs::write(dir.join(PENDING_FILE), "x\nx\ny\n").unwrap();
+
+        let remaining = remove_lines(&dir, PENDING_FILE, &["x".to_string()]).unwrap();
+
+        assert_eq!(remaining, 2);
+        assert_eq!(
+            fs::read_to_string(dir.join(PENDING_FILE)).unwrap(),
+            "x\ny\n"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn with_inbox_sees_claimed_entries_for_dedup() {
+        let dir = scratch("dedup");
+        fs::write(dir.join(CLAIMED_FILE), "{\"query\":\"busy\"}\n").unwrap();
+
+        let seen = with_inbox_in(&dir, |existing, _| existing.contains("busy")).unwrap();
+
+        assert!(seen);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_appends_are_never_lost_across_claims() {
+        let dir = scratch("race");
+        let writers = 4;
+        let per_writer = 250;
+        let done = Arc::new(AtomicBool::new(false));
+
+        let handles: Vec<_> = (0..writers)
+            .map(|w| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for i in 0..per_writer {
+                        with_inbox_in(&dir, |_, f| writeln!(f, "{{\"w\":{w},\"i\":{i}}}").unwrap())
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        let claimer = {
+            let dir = dir.clone();
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let mut seen: Vec<String> = Vec::new();
+                loop {
+                    let finished = done.load(Ordering::SeqCst);
+                    seen.extend(claim_inbox_in(&dir).unwrap());
+                    release_claim_in(&dir).unwrap();
+                    if finished {
+                        return seen;
+                    }
+                }
+            })
+        };
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        done.store(true, Ordering::SeqCst);
+        let seen = claimer.join().unwrap();
+
+        let unique: HashSet<&String> = seen.iter().collect();
+        assert_eq!(seen.len(), writers * per_writer);
+        assert_eq!(unique.len(), writers * per_writer);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

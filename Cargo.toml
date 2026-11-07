@@ -2,7 +2,7 @@
 name = "c0"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "A bi-temporal knowledge-graph memory system for LLMs — hybrid keyword + vector retrieval over Neo4j, with a self-improving reflection loop."
 license = "MIT"
 repository = "https://github.com/douglasjordan2/c0"

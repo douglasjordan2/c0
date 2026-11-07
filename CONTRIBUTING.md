@@ -12,7 +12,7 @@ cargo build --features sessions # with the optional Claude Code session adapter
 cargo test --all-features
 ```
 
-You'll need Rust (2024 edition / 1.85+), Docker, and Ollama. An `ANTHROPIC_API_KEY` is optional
+You'll need Rust (2024 edition / 1.89+), Docker, and Ollama. An `ANTHROPIC_API_KEY` is optional
 (only the reflection classifier and concept extraction use it).
 
 ## Before you open a PR

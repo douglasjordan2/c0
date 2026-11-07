@@ -390,6 +390,12 @@ enum ReflectorCommands {
     Clear,
     Process,
     Notify,
+    #[command(about = "Atomically move the inbox into the processing batch and print it as JSONL")]
+    Claim,
+    #[command(about = "Drop the processing batch once every entry in it has been handled")]
+    Release,
+    #[command(about = "Append JSONL records from stdin to the review queue")]
+    EnqueueReview,
     /// Run the loop continuously: classify the inbox, apply commits, then sleep.
     Run {
         /// How often to tick, e.g. 30s, 5m, 1h (a bare number means seconds).
@@ -868,31 +874,22 @@ fn log_dead_end(command: &str, query: &str, namespace: &str, context: Option<&st
                 let _ = f.write_all(entry.as_bytes());
             }
         }
-
-        let inbox_dir = home.join(".c0/reflector");
-        if std::fs::create_dir_all(&inbox_dir).is_ok() {
-            let inbox_file = inbox_dir.join("inbox.jsonl");
-            let existing = std::fs::read_to_string(&inbox_file).unwrap_or_default();
-            if inbox_has_dead_end(&existing, query, namespace) {
-                return;
-            }
-            let entry = serde_json::json!({
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "session": session_id,
-                "namespace": namespace,
-                "command": command,
-                "query": query,
-                "context": context,
-            });
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(inbox_file)
-            {
-                let _ = writeln!(f, "{entry}");
-            }
-        }
     }
+
+    let _ = reflector::with_inbox(|existing, f| {
+        if inbox_has_dead_end(existing, query, namespace) {
+            return;
+        }
+        let entry = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "session": session_id,
+            "namespace": namespace,
+            "command": command,
+            "query": query,
+            "context": context,
+        });
+        let _ = writeln!(f, "{entry}");
+    });
 }
 
 fn inbox_has_dead_end(inbox: &str, query: &str, namespace: &str) -> bool {
@@ -1158,6 +1155,9 @@ async fn main() -> Result<()> {
                 ReflectorCommands::Clear => reflector::clear()?,
                 ReflectorCommands::Process => reflector::process().await?,
                 ReflectorCommands::Notify => reflector::notify().await?,
+                ReflectorCommands::Claim => reflector::claim()?,
+                ReflectorCommands::Release => reflector::release()?,
+                ReflectorCommands::EnqueueReview => reflector::enqueue_review()?,
                 ReflectorCommands::Run { interval, no_apply } => {
                     reflector::run(&interval, !no_apply).await?
                 }
@@ -3328,45 +3328,29 @@ async fn main() -> Result<()> {
 
             let queued = if extraction_config.queue_unknown && !unknown_concepts.is_empty() {
                 let session_id = get_session_id().unwrap_or_else(|| "unknown".to_string());
-                if let Some(home) = dirs::home_dir() {
-                    let inbox_dir = home.join(".c0/reflector");
-                    if std::fs::create_dir_all(&inbox_dir).is_ok() {
-                        let inbox_file = inbox_dir.join("inbox.jsonl");
-                        let existing = std::fs::read_to_string(&inbox_file).unwrap_or_default();
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(inbox_file)
+                reflector::with_inbox(|existing, f| {
+                    let mut written: Vec<String> = Vec::new();
+                    for concept in &unknown_concepts {
+                        let key = concept.trim().to_lowercase();
+                        if written.contains(&key)
+                            || inbox_has_dead_end(existing, concept, &ctx.namespace)
                         {
-                            let mut written: Vec<String> = Vec::new();
-                            for concept in &unknown_concepts {
-                                let key = concept.trim().to_lowercase();
-                                if written.contains(&key)
-                                    || inbox_has_dead_end(&existing, concept, &ctx.namespace)
-                                {
-                                    continue;
-                                }
-                                written.push(key);
-                                let entry = serde_json::json!({
-                                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                                    "session": session_id,
-                                    "namespace": ctx.namespace,
-                                    "command": "extract-concepts",
-                                    "query": concept,
-                                    "context": format!("Extracted from prompt: {}", &prompt[..std::cmp::min(100, prompt.len())]),
-                                });
-                                let _ = writeln!(f, "{entry}");
-                            }
-                            !written.is_empty()
-                        } else {
-                            false
+                            continue;
                         }
-                    } else {
-                        false
+                        written.push(key);
+                        let entry = serde_json::json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "session": session_id,
+                            "namespace": ctx.namespace,
+                            "command": "extract-concepts",
+                            "query": concept,
+                            "context": format!("Extracted from prompt: {}", &prompt[..std::cmp::min(100, prompt.len())]),
+                        });
+                        let _ = writeln!(f, "{entry}");
                     }
-                } else {
-                    false
-                }
+                    !written.is_empty()
+                })
+                .unwrap_or(false)
             } else {
                 false
             };

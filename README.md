@@ -107,7 +107,7 @@ required. Details and the golden set: **[EVAL.md](EVAL.md)**.
 
 ## Requirements
 
-- **Rust** (2024 edition — 1.85+)
+- **Rust** (2024 edition — 1.89+)
 - **Neo4j 5** — a `docker-compose.yml` is included
 - **[Ollama](https://ollama.com/)** for local embeddings *and* the reflection loop's classifier (defaults: `nomic-embed-text` for embeddings, `hermes3:8b` for classification) — the whole loop runs locally, no key required
 - *(optional)* **Claude for the background LLM** — opt in with `[claude] enabled = true` to use Claude instead of a local model for classification/extraction, either via an **Anthropic API key** or your **Claude subscription** (the `claude` CLI). See [Configuration](#configuration)
@@ -402,6 +402,14 @@ c0 reflector review     # walk the QUEUE'd items interactively
 c0 reflector inbox      # show the raw dead-end inbox
 c0 reflector notify     # emit a summary of the queue state
 c0 reflector clear      # empty the inbox / pending queues
+```
+
+**Concurrency.** Every queue write takes a short `flock` on `~/.c0/reflector/reflector.lock`, so live sessions can keep logging dead ends while a cycle runs or while you are mid-`review`. `process` first *claims* the inbox (moving it to `inbox.processing.jsonl`) and drops the batch only after its results are saved, so an interrupted run is retried on the next tick rather than lost. If you drive the queue from your own script or agent instead of `process`, use the same primitives instead of editing the files directly:
+
+```bash
+c0 reflector claim                    # move the inbox into the processing batch, print it as JSONL
+echo '{"query":"…"}' | c0 reflector enqueue-review   # append validated JSONL to the review queue
+c0 reflector release                  # drop the batch once every entry is handled
 ```
 
 **Draining a backlog by hand** — when dead ends have piled up and you want them in the graph now:
