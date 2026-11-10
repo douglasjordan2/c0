@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use neo4rs::{Graph, query};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 const DEFAULT_NEO4J_URI: &str = "bolt://localhost:7687";
@@ -1582,6 +1582,22 @@ pub async fn find_similar_concepts_temporal(
     namespaces: &[String],
     temporal: &TemporalQuery,
 ) -> Result<Vec<(String, f32)>> {
+    Ok(
+        vector_candidates_temporal(graph, embedding, threshold, namespaces, temporal)
+            .await?
+            .into_iter()
+            .map(|r| (r.name, r.similarity))
+            .collect(),
+    )
+}
+
+async fn vector_candidates_temporal(
+    graph: &Graph,
+    embedding: &[f32],
+    threshold: f32,
+    namespaces: &[String],
+    temporal: &TemporalQuery,
+) -> Result<Vec<SearchResult>> {
     let embedding_vec: Vec<f64> = embedding.iter().map(|&x| f64::from(x)).collect();
     let temporal_clause = temporal.build_and_clause("node");
 
@@ -1590,7 +1606,7 @@ pub async fn find_similar_concepts_temporal(
          YIELD node, score
          WHERE node.namespace IN $namespaces
            AND score >= $threshold{temporal_clause}
-         RETURN node.name AS name, score AS similarity
+         RETURN node.name AS name, node.namespace AS namespace, score AS similarity
          ORDER BY score DESC"
     );
 
@@ -1608,8 +1624,14 @@ pub async fn find_similar_concepts_temporal(
             let mut concepts = Vec::new();
             while let Some(row) = rows.next().await? {
                 let name: String = row.get("name").unwrap_or_default();
+                let namespace: String = row.get("namespace").unwrap_or_default();
                 let similarity: f64 = row.get("similarity").unwrap_or(0.0);
-                concepts.push((name, similarity as f32));
+                concepts.push(SearchResult {
+                    name,
+                    namespace,
+                    description: None,
+                    similarity: similarity as f32,
+                });
             }
             Ok(concepts)
         }
@@ -2407,10 +2429,10 @@ pub async fn search_hybrid_temporal(
     namespaces: &[String],
     temporal: &TemporalQuery,
     config: &HybridSearchConfig,
-) -> Result<Vec<(String, f32)>> {
+) -> Result<Vec<HybridCandidate>> {
     let ft_results =
         search_concepts_fulltext(graph, query_text, config.fulltext_limit, namespaces).await?;
-    let vec_raw = find_similar_concepts_temporal(
+    let vec_results = vector_candidates_temporal(
         graph,
         embedding,
         config.vector_threshold,
@@ -2420,14 +2442,13 @@ pub async fn search_hybrid_temporal(
     .await
     .unwrap_or_default();
 
-    let vec_results: Vec<SearchResult> = vec_raw
+    let cosine: HashMap<(&str, &str), f32> = vec_results
         .iter()
-        .map(|(name, score)| SearchResult {
-            name: name.clone(),
-            namespace: String::new(),
-            description: None,
-            similarity: *score,
-        })
+        .map(|r| ((r.name.as_str(), r.namespace.as_str()), r.similarity))
+        .collect();
+    let keyword: HashSet<(&str, &str)> = ft_results
+        .iter()
+        .map(|r| (r.name.as_str(), r.namespace.as_str()))
         .collect();
 
     let fused = reciprocal_rank_fusion(
@@ -2437,7 +2458,70 @@ pub async fn search_hybrid_temporal(
         config.alpha,
         config.k,
     );
-    Ok(fused.into_iter().map(|r| (r.name, r.similarity)).collect())
+    Ok(fused
+        .into_iter()
+        .map(|r| HybridCandidate {
+            cosine: cosine
+                .get(&(r.name.as_str(), r.namespace.as_str()))
+                .copied(),
+            keyword: keyword.contains(&(r.name.as_str(), r.namespace.as_str())),
+            name: r.name,
+            fused: r.similarity,
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HybridCandidate {
+    pub name: String,
+    pub fused: f32,
+    pub cosine: Option<f32>,
+    pub keyword: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EntryGate {
+    pub min_cosine: f32,
+    pub min_cosine_with_keyword: f32,
+}
+
+impl EntryGate {
+    fn admits(&self, candidate: &HybridCandidate, query_norm: &str) -> bool {
+        if candidate.name.trim().to_lowercase() == query_norm {
+            return true;
+        }
+        let floor = if candidate.keyword {
+            self.min_cosine_with_keyword.min(self.min_cosine)
+        } else {
+            self.min_cosine
+        };
+        candidate.cosine.is_some_and(|s| s >= floor)
+    }
+}
+
+pub fn confident_entries<'a>(
+    candidates: &'a [HybridCandidate],
+    query_text: &str,
+    gate: EntryGate,
+    fanout: usize,
+) -> Vec<&'a HybridCandidate> {
+    let query_norm = query_text.trim().to_lowercase();
+    candidates
+        .iter()
+        .filter(|c| gate.admits(c, &query_norm))
+        .take(fanout)
+        .collect()
+}
+
+pub fn closest_candidate(candidates: &[HybridCandidate]) -> Option<&HybridCandidate> {
+    candidates
+        .iter()
+        .filter(|c| c.cosine.is_some())
+        .max_by(|a, b| {
+            a.cosine
+                .partial_cmp(&b.cosine)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 pub async fn find_orphaned_concepts(
@@ -4003,6 +4087,111 @@ mod tests {
         );
         // And the noise floor is well-separated from a perfect hit.
         assert!(vec.similarity < 1.0 && kw.similarity < 1.0);
+    }
+
+    fn candidate(name: &str, fused: f32, cosine: Option<f32>) -> HybridCandidate {
+        HybridCandidate {
+            name: name.to_string(),
+            fused,
+            cosine,
+            keyword: false,
+        }
+    }
+
+    fn with_keyword(mut c: HybridCandidate) -> HybridCandidate {
+        c.keyword = true;
+        c
+    }
+
+    const GATE: EntryGate = EntryGate {
+        min_cosine: 0.865,
+        min_cosine_with_keyword: 0.835,
+    };
+
+    #[test]
+    fn keyword_support_lowers_the_cosine_floor() {
+        let candidates = vec![
+            with_keyword(candidate("path-precedence-ordering", 1.0, Some(0.852))),
+            candidate("correction-zsh", 0.6, Some(0.855)),
+            with_keyword(candidate("swift-programming-language", 0.9, Some(0.799))),
+        ];
+
+        let names: Vec<&str> =
+            confident_entries(&candidates, "prioritize tools by reordering PATH", GATE, 3)
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+
+        assert_eq!(names, vec!["path-precedence-ordering"]);
+    }
+
+    #[test]
+    fn keyword_floor_never_exceeds_the_plain_floor() {
+        let gate = EntryGate {
+            min_cosine: 0.8,
+            min_cosine_with_keyword: 0.9,
+        };
+        let candidates = vec![with_keyword(candidate("x", 1.0, Some(0.85)))];
+
+        assert_eq!(confident_entries(&candidates, "q", gate, 3).len(), 1);
+    }
+
+    #[test]
+    fn confident_entries_drops_low_cosine_noise() {
+        let candidates = vec![
+            candidate("correction-zsh", 0.6, Some(0.855)),
+            candidate("zsh-completion", 0.59, Some(0.84)),
+        ];
+
+        assert!(confident_entries(&candidates, "zzzzqqqqxxxx", GATE, 3).is_empty());
+    }
+
+    #[test]
+    fn confident_entries_keeps_fused_order_and_fanout() {
+        let candidates = vec![
+            candidate("graph-database", 1.0, Some(0.893)),
+            candidate("weak", 0.6, Some(0.80)),
+            candidate("neo4j", 0.59, Some(0.89)),
+            candidate("graph-store", 0.58, Some(0.88)),
+            candidate("kuzu", 0.57, Some(0.87)),
+        ];
+
+        let names: Vec<&str> = confident_entries(&candidates, "graph database", GATE, 3)
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+
+        assert_eq!(names, vec!["graph-database", "neo4j", "graph-store"]);
+    }
+
+    #[test]
+    fn confident_entries_accepts_exact_name_without_vector_score() {
+        let candidates = vec![candidate("XState", 1.0, None)];
+
+        assert_eq!(confident_entries(&candidates, " xstate ", GATE, 3).len(), 1);
+    }
+
+    #[test]
+    fn confident_entries_rejects_keyword_only_partial_match() {
+        let candidates = vec![with_keyword(candidate(
+            "swift-programming-language",
+            0.4,
+            None,
+        ))];
+
+        assert!(confident_entries(&candidates, "unison language", GATE, 3).is_empty());
+    }
+
+    #[test]
+    fn closest_candidate_picks_highest_cosine_and_skips_keyword_only() {
+        let candidates = vec![
+            candidate("kw-only", 0.4, None),
+            candidate("near", 0.3, Some(0.83)),
+            candidate("nearer", 0.2, Some(0.85)),
+        ];
+
+        assert_eq!(closest_candidate(&candidates).unwrap().name, "nearer");
+        assert!(closest_candidate(&[candidate("kw-only", 0.4, None)]).is_none());
     }
 
     #[test]

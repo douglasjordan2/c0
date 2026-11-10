@@ -323,6 +323,10 @@ pub struct SemanticSettings {
     pub fallback_to_regex: bool,
     #[serde(default = "default_query_floor_threshold")]
     pub query_floor_threshold: f32,
+    #[serde(default = "default_walk_entry_threshold")]
+    pub walk_entry_threshold: f32,
+    #[serde(default = "default_walk_entry_keyword_threshold")]
+    pub walk_entry_keyword_threshold: f32,
 }
 
 impl Default for SemanticSettings {
@@ -332,8 +336,18 @@ impl Default for SemanticSettings {
             default_threshold: default_semantic_threshold(),
             fallback_to_regex: default_fallback_to_regex(),
             query_floor_threshold: default_query_floor_threshold(),
+            walk_entry_threshold: default_walk_entry_threshold(),
+            walk_entry_keyword_threshold: default_walk_entry_keyword_threshold(),
         }
     }
+}
+
+fn default_walk_entry_threshold() -> f32 {
+    0.865
+}
+
+fn default_walk_entry_keyword_threshold() -> f32 {
+    0.835
 }
 
 fn default_semantic_enabled() -> bool {
@@ -364,6 +378,8 @@ pub struct SemanticConfig {
     pub ollama_enrichment_model: String,
     pub ollama_extraction_model: String,
     pub query_floor_threshold: f32,
+    pub walk_entry_threshold: f32,
+    pub walk_entry_keyword_threshold: f32,
     pub claude: ClaudeConfig,
 }
 
@@ -381,6 +397,8 @@ impl SemanticConfig {
             ollama_enrichment_model: global_config.ollama.enrichment_model,
             ollama_extraction_model: global_config.ollama.extraction_model,
             query_floor_threshold: global_config.semantic.query_floor_threshold,
+            walk_entry_threshold: global_config.semantic.walk_entry_threshold,
+            walk_entry_keyword_threshold: global_config.semantic.walk_entry_keyword_threshold,
             claude: global_config.claude,
         }
     }

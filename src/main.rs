@@ -1838,25 +1838,46 @@ async fn main() -> Result<()> {
                         .unwrap_or_default();
 
                         const WALK_ENTRY_FANOUT: usize = 3;
-                        if let Some((best_name, score)) = similar.first() {
-                            concept = best_name.clone();
-                            let entries: Vec<String> = similar
-                                .iter()
-                                .take(WALK_ENTRY_FANOUT)
-                                .map(|(name, _)| name.clone())
-                                .collect();
+                        let confident = graph::confident_entries(
+                            &similar,
+                            &start,
+                            graph::EntryGate {
+                                min_cosine: semantic_config.walk_entry_threshold,
+                                min_cosine_with_keyword: semantic_config
+                                    .walk_entry_keyword_threshold,
+                            },
+                            WALK_ENTRY_FANOUT,
+                        );
+                        if confident.is_empty()
+                            && let Some(closest) = graph::closest_candidate(&similar)
+                        {
+                            println!(
+                                "(hybrid: no confident match for '{start}'; closest '{}' [cos: {:.3} < {:.3}])",
+                                closest.name,
+                                closest.cosine.unwrap_or(0.0),
+                                semantic_config.walk_entry_threshold
+                            );
+                        }
+                        if let Some(best) = confident.first() {
+                            concept = best.name.clone();
+                            let entries: Vec<String> =
+                                confident.iter().map(|c| c.name.clone()).collect();
+                            let cos = best
+                                .cosine
+                                .map_or_else(|| "exact".to_string(), |c| format!("{c:.3}"));
                             if entries.len() > 1 {
                                 println!(
-                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}], +merged: {})",
+                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}, cos: {}], +merged: {})",
                                     start,
-                                    best_name,
-                                    score,
+                                    best.name,
+                                    best.fused,
+                                    cos,
                                     entries[1..].join(", ")
                                 );
                             } else {
                                 println!(
-                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}])",
-                                    start, best_name, score
+                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}, cos: {}])",
+                                    start, best.name, best.fused, cos
                                 );
                             }
                             for entry in &entries {
