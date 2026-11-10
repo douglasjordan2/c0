@@ -188,6 +188,24 @@ c0 reads connection details from the environment, with a per-namespace `.c0/conf
 
 Embedding host/model (Ollama) default to `http://localhost:11434` and `nomic-embed-text`, and are configurable.
 
+### Walk entry confidence
+
+When `c0 walk` can't resolve a query by exact name or fulltext, it falls back to hybrid
+(keyword + vector) search. A hybrid candidate only becomes the walk's entry point if its raw
+cosine similarity clears `walk_entry_threshold`, or `walk_entry_keyword_threshold` when the same
+concept also appears in the keyword results. Otherwise the walk is a dead end, the query goes to
+the reflector inbox, and the output names the closest candidate. Both live under `[semantic]` in
+`~/.c0/config.toml`:
+
+```toml
+[semantic]
+walk_entry_threshold = 0.865          # min cosine for a semantic-only walk entry
+walk_entry_keyword_threshold = 0.835  # min cosine when the concept also matched by keyword
+```
+
+The defaults were calibrated for `nomic-embed-text`, where even gibberish scores around
+0.75–0.86 against a real graph; a different embedding model needs its own values.
+
 ### Security & threat model
 
 The bundled `docker-compose.yml` runs Neo4j with **auth disabled** and binds its ports to

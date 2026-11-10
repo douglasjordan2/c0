@@ -227,7 +227,7 @@ async fn cascade_ranked(
         };
         let q = embed(client, query).await?;
         let hits = graph::search_hybrid_temporal(graph, query, &q, &ns, &temporal, &config).await?;
-        return Ok(Some(hits.into_iter().map(|(name, _)| name).collect()));
+        return Ok(Some(hits.into_iter().map(|c| c.name).collect()));
     }
 
     let mut out = Vec::new();
