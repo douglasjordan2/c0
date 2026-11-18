@@ -6,6 +6,7 @@ mod embeddings;
 mod eval;
 mod export;
 mod extract;
+mod feedback;
 mod fetch;
 mod graph;
 mod reflector;
@@ -145,6 +146,19 @@ enum Commands {
     Reflector {
         #[command(subcommand)]
         action: ReflectorCommands,
+    },
+    #[command(
+        about = "Report a problem with c0 itself (bad walk, misleading output, missing feature)"
+    )]
+    Feedback {
+        #[arg(help = "What went wrong, specifically")]
+        message: Option<String>,
+        #[arg(long, help = "A proposed fix, if you have one")]
+        proposed: Option<String>,
+        #[arg(long, help = "Show recorded feedback")]
+        list: bool,
+        #[arg(long, help = "With --list, print raw JSONL")]
+        json: bool,
     },
     Fetch {
         query: String,
@@ -931,6 +945,7 @@ fn cmd_kind(c: &Commands) -> &'static str {
         Commands::Eval { .. } => "eval",
         Commands::Describe { .. } => "describe",
         Commands::Reflector { .. } => "reflector",
+        Commands::Feedback { .. } => "feedback",
         Commands::Fetch { .. } => "fetch",
         Commands::Cache { .. } => "cache",
         Commands::Backfill { .. } => "backfill",
@@ -1161,6 +1176,28 @@ async fn main() -> Result<()> {
                 ReflectorCommands::Run { interval, no_apply } => {
                     reflector::run(&interval, !no_apply).await?
                 }
+            }
+            return Ok(());
+        }
+        Commands::Feedback {
+            message,
+            proposed,
+            list,
+            json,
+        } => {
+            if list {
+                feedback::list(json)?;
+            } else if let Some(message) = message {
+                feedback::submit(
+                    &message,
+                    proposed.as_deref(),
+                    &ctx.namespace,
+                    get_session_id().as_deref(),
+                )?;
+            } else {
+                anyhow::bail!(
+                    "usage: c0 feedback \"<what went wrong>\" [--proposed \"<fix>\"] | c0 feedback --list"
+                );
             }
             return Ok(());
         }
@@ -1751,6 +1788,7 @@ async fn main() -> Result<()> {
             }
 
             let mut concept = start.clone();
+            let mut resolved_via = "exact";
             let mut patches =
                 graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal)
                     .await?;
@@ -1794,6 +1832,7 @@ async fn main() -> Result<()> {
                             best.name, best.similarity
                         );
                         concept = best.name.clone();
+                        resolved_via = "fulltext";
                         patches = graph::get_patches_temporal(
                             &graph_conn,
                             &concept,
@@ -1860,6 +1899,7 @@ async fn main() -> Result<()> {
                         }
                         if let Some(best) = confident.first() {
                             concept = best.name.clone();
+                            resolved_via = "hybrid";
                             let entries: Vec<String> =
                                 confident.iter().map(|c| c.name.clone()).collect();
                             let cos = best
@@ -1921,6 +1961,7 @@ async fn main() -> Result<()> {
                 {
                     println!("(fulltext-lowconf: '{start}' -> '{name}' [score: {score:.2}])");
                     concept = name;
+                    resolved_via = "fulltext-lowconf";
                     patches = graph::get_patches_temporal(
                         &graph_conn,
                         &concept,
@@ -1940,6 +1981,8 @@ async fn main() -> Result<()> {
                 }
             }
 
+            let walk_session = get_session_id();
+            let patch_count = patches.len();
             if !patches.is_empty() {
                 println!("KNOWLEDGE PATCH:");
                 println!("---");
@@ -1959,6 +2002,17 @@ async fn main() -> Result<()> {
 
             if connected.is_empty() {
                 log_dead_end("walk", &start, &ctx.namespace, context.as_deref());
+                feedback::record_walk(
+                    walk_session.as_deref(),
+                    &feedback::WalkRecord {
+                        query: &start,
+                        namespace: &ctx.namespace,
+                        entry: &concept,
+                        resolved_via,
+                        patches: patch_count,
+                        nodes: &[],
+                    },
+                );
                 println!("No connections from '{concept}'");
             } else {
                 let semantic_config = config::SemanticConfig::load();
@@ -1985,6 +2039,18 @@ async fn main() -> Result<()> {
                 if ranked_connected.is_empty() {
                     ranked_connected = connected.iter().map(|n| (n.clone(), 0.0)).collect();
                 }
+
+                feedback::record_walk(
+                    walk_session.as_deref(),
+                    &feedback::WalkRecord {
+                        query: &start,
+                        namespace: &ctx.namespace,
+                        entry: &concept,
+                        resolved_via,
+                        patches: patch_count,
+                        nodes: &ranked_connected,
+                    },
+                );
 
                 println!("Walking from '{concept}' (depth {depth}):");
                 for (name, score) in &ranked_connected {
@@ -3733,6 +3799,7 @@ async fn main() -> Result<()> {
         Commands::Init { .. }
         | Commands::Status
         | Commands::Reflector { .. }
+        | Commands::Feedback { .. }
         | Commands::Config { .. }
         | Commands::Health { .. } => unreachable!(),
     }
