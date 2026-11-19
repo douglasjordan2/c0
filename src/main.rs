@@ -6,6 +6,7 @@ mod embeddings;
 mod eval;
 mod export;
 mod extract;
+mod feedback;
 mod fetch;
 mod graph;
 mod reflector;
@@ -18,6 +19,17 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::time::{Duration, Instant};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+pub(crate) fn truncate_display(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
 
 fn parse_date_to_datetime(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
@@ -145,6 +157,19 @@ enum Commands {
     Reflector {
         #[command(subcommand)]
         action: ReflectorCommands,
+    },
+    #[command(
+        about = "Report a problem with c0 itself (bad walk, misleading output, missing feature)"
+    )]
+    Feedback {
+        #[arg(help = "What went wrong, specifically")]
+        message: Option<String>,
+        #[arg(long, help = "A proposed fix, if you have one")]
+        proposed: Option<String>,
+        #[arg(long, help = "Show recorded feedback")]
+        list: bool,
+        #[arg(long, help = "With --list, print raw JSONL")]
+        json: bool,
     },
     Fetch {
         query: String,
@@ -390,6 +415,12 @@ enum ReflectorCommands {
     Clear,
     Process,
     Notify,
+    #[command(about = "Atomically move the inbox into the processing batch and print it as JSONL")]
+    Claim,
+    #[command(about = "Drop the processing batch once every entry in it has been handled")]
+    Release,
+    #[command(about = "Append JSONL records from stdin to the review queue")]
+    EnqueueReview,
     /// Run the loop continuously: classify the inbox, apply commits, then sleep.
     Run {
         /// How often to tick, e.g. 30s, 5m, 1h (a bare number means seconds).
@@ -868,31 +899,22 @@ fn log_dead_end(command: &str, query: &str, namespace: &str, context: Option<&st
                 let _ = f.write_all(entry.as_bytes());
             }
         }
-
-        let inbox_dir = home.join(".c0/reflector");
-        if std::fs::create_dir_all(&inbox_dir).is_ok() {
-            let inbox_file = inbox_dir.join("inbox.jsonl");
-            let existing = std::fs::read_to_string(&inbox_file).unwrap_or_default();
-            if inbox_has_dead_end(&existing, query, namespace) {
-                return;
-            }
-            let entry = serde_json::json!({
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "session": session_id,
-                "namespace": namespace,
-                "command": command,
-                "query": query,
-                "context": context,
-            });
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(inbox_file)
-            {
-                let _ = writeln!(f, "{entry}");
-            }
-        }
     }
+
+    let _ = reflector::with_inbox(|existing, f| {
+        if inbox_has_dead_end(existing, query, namespace) {
+            return;
+        }
+        let entry = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "session": session_id,
+            "namespace": namespace,
+            "command": command,
+            "query": query,
+            "context": context,
+        });
+        let _ = writeln!(f, "{entry}");
+    });
 }
 
 fn inbox_has_dead_end(inbox: &str, query: &str, namespace: &str) -> bool {
@@ -934,6 +956,7 @@ fn cmd_kind(c: &Commands) -> &'static str {
         Commands::Eval { .. } => "eval",
         Commands::Describe { .. } => "describe",
         Commands::Reflector { .. } => "reflector",
+        Commands::Feedback { .. } => "feedback",
         Commands::Fetch { .. } => "fetch",
         Commands::Cache { .. } => "cache",
         Commands::Backfill { .. } => "backfill",
@@ -1158,9 +1181,34 @@ async fn main() -> Result<()> {
                 ReflectorCommands::Clear => reflector::clear()?,
                 ReflectorCommands::Process => reflector::process().await?,
                 ReflectorCommands::Notify => reflector::notify().await?,
+                ReflectorCommands::Claim => reflector::claim()?,
+                ReflectorCommands::Release => reflector::release()?,
+                ReflectorCommands::EnqueueReview => reflector::enqueue_review()?,
                 ReflectorCommands::Run { interval, no_apply } => {
                     reflector::run(&interval, !no_apply).await?
                 }
+            }
+            return Ok(());
+        }
+        Commands::Feedback {
+            message,
+            proposed,
+            list,
+            json,
+        } => {
+            if list {
+                feedback::list(json)?;
+            } else if let Some(message) = message {
+                feedback::submit(
+                    &message,
+                    proposed.as_deref(),
+                    &ctx.namespace,
+                    get_session_id().as_deref(),
+                )?;
+            } else {
+                anyhow::bail!(
+                    "usage: c0 feedback \"<what went wrong>\" [--proposed \"<fix>\"] | c0 feedback --list"
+                );
             }
             return Ok(());
         }
@@ -1751,6 +1799,7 @@ async fn main() -> Result<()> {
             }
 
             let mut concept = start.clone();
+            let mut resolved_via = "exact";
             let mut patches =
                 graph::get_patches_temporal(&graph_conn, &concept, &ctx.namespaces, &temporal)
                     .await?;
@@ -1794,6 +1843,7 @@ async fn main() -> Result<()> {
                             best.name, best.similarity
                         );
                         concept = best.name.clone();
+                        resolved_via = "fulltext";
                         patches = graph::get_patches_temporal(
                             &graph_conn,
                             &concept,
@@ -1838,25 +1888,47 @@ async fn main() -> Result<()> {
                         .unwrap_or_default();
 
                         const WALK_ENTRY_FANOUT: usize = 3;
-                        if let Some((best_name, score)) = similar.first() {
-                            concept = best_name.clone();
-                            let entries: Vec<String> = similar
-                                .iter()
-                                .take(WALK_ENTRY_FANOUT)
-                                .map(|(name, _)| name.clone())
-                                .collect();
+                        let confident = graph::confident_entries(
+                            &similar,
+                            &start,
+                            graph::EntryGate {
+                                min_cosine: semantic_config.walk_entry_threshold,
+                                min_cosine_with_keyword: semantic_config
+                                    .walk_entry_keyword_threshold,
+                            },
+                            WALK_ENTRY_FANOUT,
+                        );
+                        if confident.is_empty()
+                            && let Some(closest) = graph::closest_candidate(&similar)
+                        {
+                            println!(
+                                "(hybrid: no confident match for '{start}'; closest '{}' [cos: {:.3} < {:.3}])",
+                                closest.name,
+                                closest.cosine.unwrap_or(0.0),
+                                semantic_config.walk_entry_threshold
+                            );
+                        }
+                        if let Some(best) = confident.first() {
+                            concept = best.name.clone();
+                            resolved_via = "hybrid";
+                            let entries: Vec<String> =
+                                confident.iter().map(|c| c.name.clone()).collect();
+                            let cos = best
+                                .cosine
+                                .map_or_else(|| "exact".to_string(), |c| format!("{c:.3}"));
                             if entries.len() > 1 {
                                 println!(
-                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}], +merged: {})",
+                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}, cos: {}], +merged: {})",
                                     start,
-                                    best_name,
-                                    score,
+                                    best.name,
+                                    best.fused,
+                                    cos,
                                     entries[1..].join(", ")
                                 );
                             } else {
                                 println!(
-                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}])",
-                                    start, best_name, score
+                                    "(hybrid: '{}' -> '{}' [rrf: {:.6}, cos: {}])",
+                                    start, best.name, best.fused, cos
                                 );
                             }
                             for entry in &entries {
@@ -1900,6 +1972,7 @@ async fn main() -> Result<()> {
                 {
                     println!("(fulltext-lowconf: '{start}' -> '{name}' [score: {score:.2}])");
                     concept = name;
+                    resolved_via = "fulltext-lowconf";
                     patches = graph::get_patches_temporal(
                         &graph_conn,
                         &concept,
@@ -1919,6 +1992,8 @@ async fn main() -> Result<()> {
                 }
             }
 
+            let walk_session = get_session_id();
+            let patch_count = patches.len();
             if !patches.is_empty() {
                 println!("KNOWLEDGE PATCH:");
                 println!("---");
@@ -1938,6 +2013,17 @@ async fn main() -> Result<()> {
 
             if connected.is_empty() {
                 log_dead_end("walk", &start, &ctx.namespace, context.as_deref());
+                feedback::record_walk(
+                    walk_session.as_deref(),
+                    &feedback::WalkRecord {
+                        query: &start,
+                        namespace: &ctx.namespace,
+                        entry: &concept,
+                        resolved_via,
+                        patches: patch_count,
+                        nodes: &[],
+                    },
+                );
                 println!("No connections from '{concept}'");
             } else {
                 let semantic_config = config::SemanticConfig::load();
@@ -1964,6 +2050,18 @@ async fn main() -> Result<()> {
                 if ranked_connected.is_empty() {
                     ranked_connected = connected.iter().map(|n| (n.clone(), 0.0)).collect();
                 }
+
+                feedback::record_walk(
+                    walk_session.as_deref(),
+                    &feedback::WalkRecord {
+                        query: &start,
+                        namespace: &ctx.namespace,
+                        entry: &concept,
+                        resolved_via,
+                        patches: patch_count,
+                        nodes: &ranked_connected,
+                    },
+                );
 
                 println!("Walking from '{concept}' (depth {depth}):");
                 for (name, score) in &ranked_connected {
@@ -2021,11 +2119,7 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .filter(|s| !s.is_empty())
                         .unwrap_or(&session.first_prompt);
-                    let snippet = if display.len() > 90 {
-                        format!("{}...", &display[..90])
-                    } else {
-                        display.to_string()
-                    };
+                    let snippet = truncate_display(display, 93);
                     let mention = if *count > 1 {
                         format!(" ×{count}")
                     } else {
@@ -3328,45 +3422,29 @@ async fn main() -> Result<()> {
 
             let queued = if extraction_config.queue_unknown && !unknown_concepts.is_empty() {
                 let session_id = get_session_id().unwrap_or_else(|| "unknown".to_string());
-                if let Some(home) = dirs::home_dir() {
-                    let inbox_dir = home.join(".c0/reflector");
-                    if std::fs::create_dir_all(&inbox_dir).is_ok() {
-                        let inbox_file = inbox_dir.join("inbox.jsonl");
-                        let existing = std::fs::read_to_string(&inbox_file).unwrap_or_default();
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(inbox_file)
+                reflector::with_inbox(|existing, f| {
+                    let mut written: Vec<String> = Vec::new();
+                    for concept in &unknown_concepts {
+                        let key = concept.trim().to_lowercase();
+                        if written.contains(&key)
+                            || inbox_has_dead_end(existing, concept, &ctx.namespace)
                         {
-                            let mut written: Vec<String> = Vec::new();
-                            for concept in &unknown_concepts {
-                                let key = concept.trim().to_lowercase();
-                                if written.contains(&key)
-                                    || inbox_has_dead_end(&existing, concept, &ctx.namespace)
-                                {
-                                    continue;
-                                }
-                                written.push(key);
-                                let entry = serde_json::json!({
-                                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                                    "session": session_id,
-                                    "namespace": ctx.namespace,
-                                    "command": "extract-concepts",
-                                    "query": concept,
-                                    "context": format!("Extracted from prompt: {}", &prompt[..std::cmp::min(100, prompt.len())]),
-                                });
-                                let _ = writeln!(f, "{entry}");
-                            }
-                            !written.is_empty()
-                        } else {
-                            false
+                            continue;
                         }
-                    } else {
-                        false
+                        written.push(key);
+                        let entry = serde_json::json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "session": session_id,
+                            "namespace": ctx.namespace,
+                            "command": "extract-concepts",
+                            "query": concept,
+                            "context": format!("Extracted from prompt: {}", &prompt[..std::cmp::min(100, prompt.len())]),
+                        });
+                        let _ = writeln!(f, "{entry}");
                     }
-                } else {
-                    false
-                }
+                    !written.is_empty()
+                })
+                .unwrap_or(false)
             } else {
                 false
             };
@@ -3671,11 +3749,7 @@ async fn main() -> Result<()> {
                 println!("{}", "─".repeat(80));
                 for r in &results {
                     let desc = r.description.as_deref().unwrap_or("");
-                    let desc_truncated = if desc.len() > 40 {
-                        format!("{}...", &desc[..37])
-                    } else {
-                        desc.to_string()
-                    };
+                    let desc_truncated = truncate_display(desc, 40);
                     if vector_only {
                         println!(
                             "{:<6.0}% {:<16} {:<30} {}",
@@ -3728,6 +3802,7 @@ async fn main() -> Result<()> {
         Commands::Init { .. }
         | Commands::Status
         | Commands::Reflector { .. }
+        | Commands::Feedback { .. }
         | Commands::Config { .. }
         | Commands::Health { .. } => unreachable!(),
     }
@@ -3737,7 +3812,37 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{inbox_has_dead_end, should_use_semantic};
+    use super::{inbox_has_dead_end, should_use_semantic, truncate_display};
+
+    #[test]
+    fn truncate_display_returns_short_strings_unchanged() {
+        assert_eq!(truncate_display("short", 40), "short");
+        assert_eq!(truncate_display("", 40), "");
+        let exact = "x".repeat(40);
+        assert_eq!(truncate_display(&exact, 40), exact);
+    }
+
+    #[test]
+    fn truncate_display_cuts_ascii_and_appends_ellipsis() {
+        let s = "a".repeat(50);
+        let out = truncate_display(&s, 40);
+        assert_eq!(out, format!("{}...", "a".repeat(37)));
+        assert_eq!(out.len(), 40);
+    }
+
+    #[test]
+    fn truncate_display_never_splits_a_multibyte_char() {
+        let s = "一个用于捕捉报告用户原因的v1版本提示界面，暂时复用chat_report表结构。";
+        let out = truncate_display(s, 40);
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 40);
+        assert!(s.starts_with(out.trim_end_matches("...")));
+        let mixed = "ab€€€€€€€€€€€€€€€€€€";
+        for max in 3..mixed.len() + 3 {
+            let out = truncate_display(mixed, max);
+            assert!(out.len() <= max.max(3), "max={max} out={out:?}");
+        }
+    }
 
     #[test]
     fn repeated_dead_end_is_detected_case_and_whitespace_insensitively() {

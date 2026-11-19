@@ -316,8 +316,12 @@ async fn c0_context(
             let hits = graph::search_hybrid_temporal(graph, topic, &q, &ns, &temporal, &hybrid)
                 .await
                 .unwrap_or_default();
-            if let Some((name, _)) = hits.first() {
-                concept = name.clone();
+            let gate = graph::EntryGate {
+                min_cosine: sem.walk_entry_threshold,
+                min_cosine_with_keyword: sem.walk_entry_keyword_threshold,
+            };
+            if let Some(best) = graph::confident_entries(&hits, topic, gate, 1).first() {
+                concept = best.name.clone();
             }
         }
         patches = graph::get_patches_temporal(graph, &concept, &ns, &temporal).await?;
