@@ -153,7 +153,7 @@ c0 walk "reciprocal rank fusion"                             # traverses outgoin
 | `c0 search <query>` | Hybrid search without traversal (`--vector-only` / `--keyword-only`) |
 | `c0 add concept <name> -d "<desc>"` | Add a concept (embedded on write) |
 | `c0 add patch <name> --content "<text>"` | Add a knowledge patch that corrects/augments a concept |
-| `c0 relate <a> <TYPE> <b>` | Create a typed relationship |
+| `c0 relate <a> <TYPE> <b>` | Create a typed relationship (`ns:name` qualifies an endpoint outside the current namespace) |
 | `c0 supersede <old> --with <new>` | Mark a concept evolved into a newer one |
 | `c0 invalidate concept <name> --reason "<why>"` | Retract a concept with a causal trail |
 | `c0 describe <concept> "<new desc>"` | Update a description (and re-embed) |
