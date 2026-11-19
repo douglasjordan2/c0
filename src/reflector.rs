@@ -17,6 +17,7 @@ const CLAIMED_FILE: &str = "inbox.processing.jsonl";
 const REVIEW_FILE: &str = "review.jsonl";
 const PENDING_FILE: &str = "pending-commits.jsonl";
 const LOCK_FILE: &str = "reflector.lock";
+const FEEDBACK_FILE: &str = "feedback.jsonl";
 
 fn reflector_dir() -> PathBuf {
     dirs::home_dir()
@@ -125,6 +126,24 @@ pub fn with_inbox<T>(f: impl FnOnce(&str, &mut fs::File) -> T) -> Result<T> {
     with_inbox_in(&reflector_dir(), f)
 }
 
+fn append_feedback_in(dir: &Path, line: &str, is_duplicate: impl Fn(&str) -> bool) -> Result<bool> {
+    let _lock = lock_dir(dir)?;
+    let path = dir.join(FEEDBACK_FILE);
+    if non_empty_lines(&read_or_empty(&path)?).any(is_duplicate) {
+        return Ok(false);
+    }
+    append_unlocked(&path, &[line])?;
+    Ok(true)
+}
+
+pub fn append_feedback(line: &str, is_duplicate: impl Fn(&str) -> bool) -> Result<bool> {
+    append_feedback_in(&reflector_dir(), line, is_duplicate)
+}
+
+pub fn read_feedback() -> Result<String> {
+    read_or_empty(&reflector_dir().join(FEEDBACK_FILE))
+}
+
 fn claim_inbox_in(dir: &Path) -> Result<Vec<String>> {
     let _lock = lock_dir(dir)?;
     let inbox = dir.join(INBOX_FILE);
@@ -219,6 +238,10 @@ pub fn status() -> Result<()> {
     println!("Proposed: {proposed_count} learning(s)");
     println!("Review queue: {review_count} item(s)");
     println!("Pending commits: {pending_count} concept(s)");
+    let feedback_count = count_lines(&dir.join(FEEDBACK_FILE));
+    if feedback_count > 0 {
+        println!("Feedback: {feedback_count} report(s) (c0 feedback --list)");
+    }
     println!();
     if pending_count > 0 {
         println!("Run 'c0 reflector apply' to commit pending concepts.");
@@ -983,6 +1006,19 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn append_feedback_skips_duplicates_and_keeps_distinct_reports() {
+        let dir = scratch("feedback");
+
+        assert!(append_feedback_in(&dir, "{\"message\":\"a\"}", |l| l.contains("\"a\"")).unwrap());
+        assert!(!append_feedback_in(&dir, "{\"message\":\"a\"}", |l| l.contains("\"a\"")).unwrap());
+        assert!(append_feedback_in(&dir, "{\"message\":\"b\"}", |l| l.contains("\"b\"")).unwrap());
+
+        let stored = fs::read_to_string(dir.join(FEEDBACK_FILE)).unwrap();
+        assert_eq!(stored, "{\"message\":\"a\"}\n{\"message\":\"b\"}\n");
+        assert!(!dir.join(INBOX_FILE).exists());
     }
 
     #[test]

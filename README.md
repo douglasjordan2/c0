@@ -158,6 +158,7 @@ c0 walk "reciprocal rank fusion"                             # traverses outgoin
 | `c0 invalidate concept <name> --reason "<why>"` | Retract a concept with a causal trail |
 | `c0 describe <concept> "<new desc>"` | Update a description (and re-embed) |
 | `c0 reflector run` | Run the learning loop: classify dead ends → commit new concepts (see [below](#the-reflection-loop--c0s-learning-engine)) |
+| `c0 feedback "<what went wrong>"` | Let the agent report a problem with c0 itself, with its last walk attached (see [below](#feedback-about-c0-itself)) |
 | `c0 health --fix` | Check Neo4j / Ollama / indexes |
 | `c0 audit enrich` | Reconnect orphaned concepts to nearest neighbours (`--dry-run`, `--rollback`) |
 | `c0 export` · `c0 audit` · `c0 move` | Maintenance utilities |
@@ -441,6 +442,17 @@ c0 reflector review     # walk anything it left QUEUE'd for you
 ```
 
 Easier still: hand the backlog to your terminal agent and let it drive these commands while you decide. Something like *"walk me through the reflector inbox interactively"* turns the chore into a conversation — the agent runs `process`, reads back what it wants to COMMIT, and you approve or redirect each call without memorizing the sequence.
+
+### Feedback about c0 itself
+
+Dead ends capture what the graph is missing. They do not capture a walk that *succeeded* but came back wrong: the wrong entry concept, unrelated nodes ranked next to relevant ones, confusing output. For that, the agent using c0 can file a report:
+
+```bash
+c0 feedback "walk 'slack' ranked clipboard tools next to Slack concepts" --proposed "drop nodes far below the top score"
+c0 feedback --list      # read the reports (add --json for raw JSONL)
+```
+
+Each report is appended to `~/.c0/reflector/feedback.jsonl` under the same lock as the other queues, and carries the namespace, session, c0 version and commit, and the last walk of that session (query, entry concept, which cascade tier resolved it, and the ranked nodes). Nothing leaves your machine and nothing acts on the reports automatically; they are a queue for you to read. Tell your agent when to use it by adding a line to its instructions, e.g. *"when a c0 command returns something wrong or misleading, run `c0 feedback` with what you expected."*
 
 > Classification runs on a **local Ollama model by default** (`hermes3:8b`) — no key, no cloud, reusing the Ollama you already run for embeddings. Want Claude's higher-quality judgment instead? Point `[claude]` at the Anthropic API *or* your Claude subscription's `claude` CLI — see [Configuration](#configuration).
 
