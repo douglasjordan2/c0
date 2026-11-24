@@ -17,15 +17,15 @@ const CLAIMED_FILE: &str = "inbox.processing.jsonl";
 const REVIEW_FILE: &str = "review.jsonl";
 const PENDING_FILE: &str = "pending-commits.jsonl";
 const LOCK_FILE: &str = "reflector.lock";
-const FEEDBACK_FILE: &str = "feedback.jsonl";
+pub(crate) const FEEDBACK_FILE: &str = "feedback.jsonl";
 
-fn reflector_dir() -> PathBuf {
+pub(crate) fn reflector_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".c0/reflector")
 }
 
-fn lock_dir(dir: &Path) -> Result<fs::File> {
+pub(crate) fn lock_dir(dir: &Path) -> Result<fs::File> {
     fs::create_dir_all(dir)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -36,7 +36,7 @@ fn lock_dir(dir: &Path) -> Result<fs::File> {
     Ok(lock)
 }
 
-fn read_or_empty(path: &Path) -> Result<String> {
+pub(crate) fn read_or_empty(path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
@@ -44,7 +44,7 @@ fn read_or_empty(path: &Path) -> Result<String> {
     }
 }
 
-fn non_empty_lines(content: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn non_empty_lines(content: &str) -> impl Iterator<Item = &str> {
     content.lines().filter(|l| !l.trim().is_empty())
 }
 
@@ -54,7 +54,7 @@ fn count_lines(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn join_lines<S: AsRef<str>>(lines: &[S]) -> String {
+pub(crate) fn join_lines<S: AsRef<str>>(lines: &[S]) -> String {
     let mut out = String::new();
     for line in lines {
         out.push_str(line.as_ref().trim_end_matches('\n'));
@@ -63,7 +63,7 @@ fn join_lines<S: AsRef<str>>(lines: &[S]) -> String {
     out
 }
 
-fn append_unlocked<S: AsRef<str>>(path: &Path, lines: &[S]) -> Result<()> {
+pub(crate) fn append_unlocked<S: AsRef<str>>(path: &Path, lines: &[S]) -> Result<()> {
     if lines.is_empty() {
         return Ok(());
     }
@@ -75,7 +75,7 @@ fn append_unlocked<S: AsRef<str>>(path: &Path, lines: &[S]) -> Result<()> {
     Ok(())
 }
 
-fn write_atomic(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension("jsonl.tmp");
     fs::write(&tmp, content)?;
     fs::rename(&tmp, path)?;
@@ -138,10 +138,6 @@ fn append_feedback_in(dir: &Path, line: &str, is_duplicate: impl Fn(&str) -> boo
 
 pub fn append_feedback(line: &str, is_duplicate: impl Fn(&str) -> bool) -> Result<bool> {
     append_feedback_in(&reflector_dir(), line, is_duplicate)
-}
-
-pub fn read_feedback() -> Result<String> {
-    read_or_empty(&reflector_dir().join(FEEDBACK_FILE))
 }
 
 fn claim_inbox_in(dir: &Path) -> Result<Vec<String>> {
@@ -238,9 +234,12 @@ pub fn status() -> Result<()> {
     println!("Proposed: {proposed_count} learning(s)");
     println!("Review queue: {review_count} item(s)");
     println!("Pending commits: {pending_count} concept(s)");
-    let feedback_count = count_lines(&dir.join(FEEDBACK_FILE));
-    if feedback_count > 0 {
-        println!("Feedback: {feedback_count} report(s) (c0 feedback --list)");
+    let feedback_new = count_lines(&dir.join(FEEDBACK_FILE));
+    let feedback_claimed = count_lines(&dir.join(crate::feedback::PROCESSING_FILE));
+    if feedback_new + feedback_claimed > 0 {
+        println!(
+            "Feedback: {feedback_new} new, {feedback_claimed} claimed report(s) (c0 feedback --list)"
+        );
     }
     println!();
     if pending_count > 0 {

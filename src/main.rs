@@ -159,9 +159,12 @@ enum Commands {
         action: ReflectorCommands,
     },
     #[command(
-        about = "Report a problem with c0 itself (bad walk, misleading output, missing feature)"
+        about = "Report a problem with c0 itself (bad walk, misleading output, missing feature)",
+        args_conflicts_with_subcommands = true
     )]
     Feedback {
+        #[command(subcommand)]
+        action: Option<FeedbackCommands>,
         #[arg(help = "What went wrong, specifically")]
         message: Option<String>,
         #[arg(long, help = "A proposed fix, if you have one")]
@@ -170,6 +173,8 @@ enum Commands {
         list: bool,
         #[arg(long, help = "With --list, print raw JSONL")]
         json: bool,
+        #[arg(long, help = "With --list, show resolved reports instead of open ones")]
+        resolved: bool,
     },
     Fetch {
         query: String,
@@ -403,6 +408,25 @@ enum TriggerCommands {
 enum ConfigCommands {
     TestOllama,
     Show,
+}
+
+#[derive(Subcommand)]
+enum FeedbackCommands {
+    #[command(
+        about = "Move new reports into the processing batch, assign ids, print the batch as JSONL"
+    )]
+    Claim,
+    #[command(about = "Close claimed reports with an outcome; unresolved ones stay claimed")]
+    Resolve {
+        #[arg(required = true, help = "Report id(s) from `c0 feedback claim`")]
+        ids: Vec<String>,
+        #[arg(long, value_parser = feedback::OUTCOMES)]
+        outcome: String,
+        #[arg(long = "ref", help = "PR or issue URL")]
+        reference: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1191,13 +1215,32 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Commands::Feedback {
+            action,
             message,
             proposed,
             list,
             json,
+            resolved,
         } => {
-            if list {
-                feedback::list(json)?;
+            if let Some(action) = action {
+                match action {
+                    FeedbackCommands::Claim => feedback::claim()?,
+                    FeedbackCommands::Resolve {
+                        ids,
+                        outcome,
+                        reference,
+                        note,
+                    } => feedback::resolve(
+                        &ids,
+                        &feedback::Resolution {
+                            outcome: &outcome,
+                            reference: reference.as_deref(),
+                            note: note.as_deref(),
+                        },
+                    )?,
+                }
+            } else if list {
+                feedback::list(json, resolved)?;
             } else if let Some(message) = message {
                 feedback::submit(
                     &message,
