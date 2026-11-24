@@ -1,12 +1,24 @@
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::reflector;
 
 const LAST_WALK_FILE: &str = "last-walk.json";
 const MAX_WALK_NODES: usize = 20;
+pub(crate) const PROCESSING_FILE: &str = "feedback.processing.jsonl";
+const RESOLVED_FILE: &str = "feedback.resolved.jsonl";
+pub const OUTCOMES: [&str; 7] = [
+    "pr",
+    "issue",
+    "review",
+    "fixed",
+    "duplicate",
+    "wontfix",
+    "not-reproducible",
+];
 
 pub struct WalkRecord<'a> {
     pub query: &'a str,
@@ -88,6 +100,7 @@ fn build_entry(
     timestamp: &str,
 ) -> Value {
     json!({
+        "id": short_hash(&format!("{timestamp}\n{message}")),
         "timestamp": timestamp,
         "session": c0_session,
         "claude_session": claude_session,
@@ -156,6 +169,157 @@ pub fn submit(
     Ok(())
 }
 
+fn short_hash(text: &str) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in text.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
+
+fn ensure_id(line: &str, taken: &mut HashSet<String>) -> String {
+    let Ok(mut entry) = serde_json::from_str::<Value>(line) else {
+        return line.to_string();
+    };
+    let existing = field(&entry, "id").map(String::from);
+    let base = existing.clone().unwrap_or_else(|| short_hash(line));
+    let mut id = base.clone();
+    let mut n = 2;
+    while !taken.insert(id.clone()) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    if existing.as_deref() == Some(id.as_str()) {
+        return line.to_string();
+    }
+    if let Some(map) = entry.as_object_mut() {
+        map.insert("id".to_string(), Value::String(id));
+    }
+    entry.to_string()
+}
+
+fn claim_in(dir: &Path) -> Result<Vec<String>> {
+    let _lock = reflector::lock_dir(dir)?;
+    let inbox = dir.join(reflector::FEEDBACK_FILE);
+    let processing = dir.join(PROCESSING_FILE);
+
+    let claimed = reflector::read_or_empty(&processing)?;
+    let mut taken: HashSet<String> = reflector::non_empty_lines(&claimed)
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|e| field(&e, "id").map(String::from))
+        .collect();
+
+    let incoming = reflector::read_or_empty(&inbox)?;
+    let incoming: Vec<String> = reflector::non_empty_lines(&incoming)
+        .map(|l| ensure_id(l, &mut taken))
+        .collect();
+    if !incoming.is_empty() {
+        reflector::append_unlocked(&processing, &incoming)?;
+        fs::write(&inbox, "")?;
+    }
+
+    Ok(
+        reflector::non_empty_lines(&reflector::read_or_empty(&processing)?)
+            .map(String::from)
+            .collect(),
+    )
+}
+
+pub fn claim() -> Result<()> {
+    let lines = claim_in(&reflector::reflector_dir())?;
+    if lines.is_empty() {
+        eprintln!("No open feedback.");
+    }
+    for line in &lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub struct Resolution<'a> {
+    pub outcome: &'a str,
+    pub reference: Option<&'a str>,
+    pub note: Option<&'a str>,
+}
+
+fn resolve_in(
+    dir: &Path,
+    ids: &[String],
+    resolution: &Resolution,
+    timestamp: &str,
+) -> Result<usize> {
+    if !OUTCOMES.contains(&resolution.outcome) {
+        anyhow::bail!(
+            "unknown outcome '{}' (use one of: {})",
+            resolution.outcome,
+            OUTCOMES.join(", ")
+        );
+    }
+    let _lock = reflector::lock_dir(dir)?;
+    let processing = dir.join(PROCESSING_FILE);
+    let current = reflector::read_or_empty(&processing)?;
+
+    let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut found: HashSet<String> = HashSet::new();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut resolved: Vec<String> = Vec::new();
+
+    for line in reflector::non_empty_lines(&current) {
+        let entry = serde_json::from_str::<Value>(line).ok();
+        let id = entry
+            .as_ref()
+            .and_then(|e| field(e, "id"))
+            .map(String::from);
+        match (entry, id) {
+            (Some(mut entry), Some(id)) if wanted.contains(id.as_str()) => {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert(
+                        "resolution".to_string(),
+                        json!({
+                            "outcome": resolution.outcome,
+                            "ref": resolution.reference,
+                            "note": resolution.note,
+                            "resolved_at": timestamp,
+                        }),
+                    );
+                }
+                found.insert(id);
+                resolved.push(entry.to_string());
+            }
+            _ => kept.push(line),
+        }
+    }
+
+    let mut missing: Vec<&str> = wanted
+        .iter()
+        .copied()
+        .filter(|id| !found.contains(*id))
+        .collect();
+    if !missing.is_empty() {
+        missing.sort_unstable();
+        anyhow::bail!(
+            "no claimed feedback with id(s): {} (run `c0 feedback claim` first); nothing resolved",
+            missing.join(", ")
+        );
+    }
+
+    reflector::append_unlocked(&dir.join(RESOLVED_FILE), &resolved)?;
+    reflector::write_atomic(&processing, &reflector::join_lines(&kept))?;
+    Ok(resolved.len())
+}
+
+pub fn resolve(ids: &[String], resolution: &Resolution) -> Result<()> {
+    let count = resolve_in(
+        &reflector::reflector_dir(),
+        ids,
+        resolution,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    println!("Resolved {count} report(s) as {}.", resolution.outcome);
+    Ok(())
+}
+
 fn describe_walk(walk: &Value) -> Option<String> {
     let query = field(walk, "query")?;
     let entry = field(walk, "entry").unwrap_or("?");
@@ -174,9 +338,18 @@ fn describe_walk(walk: &Value) -> Option<String> {
     ))
 }
 
-pub fn list(as_json: bool) -> Result<()> {
-    let content = reflector::read_feedback()?;
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+pub fn list(as_json: bool, resolved: bool) -> Result<()> {
+    let dir = reflector::reflector_dir();
+    let content = if resolved {
+        reflector::read_or_empty(&dir.join(RESOLVED_FILE))?
+    } else {
+        let mut open = reflector::read_or_empty(&dir.join(PROCESSING_FILE))?;
+        open.push_str(&reflector::read_or_empty(
+            &dir.join(reflector::FEEDBACK_FILE),
+        )?);
+        open
+    };
+    let lines: Vec<&str> = reflector::non_empty_lines(&content).collect();
 
     if as_json {
         for line in &lines {
@@ -186,11 +359,22 @@ pub fn list(as_json: bool) -> Result<()> {
     }
 
     if lines.is_empty() {
-        println!("No feedback recorded.");
+        println!(
+            "{}",
+            if resolved {
+                "No resolved feedback."
+            } else {
+                "No open feedback."
+            }
+        );
         return Ok(());
     }
 
-    println!("{} feedback report(s)", lines.len());
+    println!(
+        "{} {} feedback report(s)",
+        lines.len(),
+        if resolved { "resolved" } else { "open" }
+    );
     println!("═══════════════════════════════════════");
     for line in lines {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -203,7 +387,8 @@ pub fn list(as_json: bool) -> Result<()> {
             .take(16)
             .collect();
         println!(
-            "[{}] {} (c0 {})",
+            "{} [{}] {} (c0 {})",
+            field(&entry, "id").unwrap_or("--------"),
             when.replace('T', " "),
             field(&entry, "namespace").unwrap_or("?"),
             field(&entry, "c0_sha").unwrap_or("unknown"),
@@ -217,6 +402,16 @@ pub fn list(as_json: bool) -> Result<()> {
         }
         if let Some(session) = field(&entry, "claude_session") {
             println!("  resume: claude --resume {session}");
+        }
+        if let Some(resolution) = entry.get("resolution") {
+            println!(
+                "  resolved: {} {}",
+                field(resolution, "outcome").unwrap_or("?"),
+                field(resolution, "ref").unwrap_or("")
+            );
+            if let Some(note) = field(resolution, "note") {
+                println!("  note: {note}");
+            }
         }
         println!();
     }
@@ -312,6 +507,114 @@ mod tests {
 
         let dead = json!({ "query": "nope", "dead_end": true });
         assert_eq!(describe_walk(&dead).unwrap(), "'nope' -> dead end");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("c0-feedback-{name}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ids_of(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                v["id"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn claim_assigns_stable_ids_and_keeps_earlier_claims() {
+        let dir = scratch("claim");
+        let inbox = dir.join(reflector::FEEDBACK_FILE);
+        fs::write(&inbox, "{\"message\":\"a\"}\n{\"message\":\"a\"}\n").unwrap();
+
+        let first = claim_in(&dir).unwrap();
+        let first_ids = ids_of(&first);
+        assert_eq!(first.len(), 2);
+        assert_ne!(first_ids[0], first_ids[1]);
+        assert_eq!(fs::read_to_string(&inbox).unwrap(), "");
+
+        fs::write(&inbox, "{\"id\":\"keepme\",\"message\":\"b\"}\n").unwrap();
+        let second = claim_in(&dir).unwrap();
+        let second_ids = ids_of(&second);
+        assert_eq!(second_ids[..2], first_ids[..]);
+        assert_eq!(second_ids[2], "keepme");
+    }
+
+    #[test]
+    fn resolve_moves_only_the_named_reports_and_records_the_outcome() {
+        let dir = scratch("resolve");
+        fs::write(
+            dir.join(reflector::FEEDBACK_FILE),
+            "{\"id\":\"one\",\"message\":\"a\"}\n{\"id\":\"two\",\"message\":\"b\"}\n",
+        )
+        .unwrap();
+        claim_in(&dir).unwrap();
+
+        let resolution = Resolution {
+            outcome: "pr",
+            reference: Some("https://example.test/pr/1"),
+            note: None,
+        };
+        let n = resolve_in(
+            &dir,
+            &["one".to_string()],
+            &resolution,
+            "2026-11-23T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+
+        let left = fs::read_to_string(dir.join(PROCESSING_FILE)).unwrap();
+        assert_eq!(left, "{\"id\":\"two\",\"message\":\"b\"}\n");
+
+        let done: Value =
+            serde_json::from_str(fs::read_to_string(dir.join(RESOLVED_FILE)).unwrap().trim())
+                .unwrap();
+        assert_eq!(done["id"], "one");
+        assert_eq!(done["resolution"]["outcome"], "pr");
+        assert_eq!(done["resolution"]["ref"], "https://example.test/pr/1");
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_ids_and_outcomes_without_changing_anything() {
+        let dir = scratch("resolve-bad");
+        fs::write(
+            dir.join(reflector::FEEDBACK_FILE),
+            "{\"id\":\"one\",\"message\":\"a\"}\n",
+        )
+        .unwrap();
+        claim_in(&dir).unwrap();
+        let before = fs::read_to_string(dir.join(PROCESSING_FILE)).unwrap();
+
+        let ok = Resolution {
+            outcome: "wontfix",
+            reference: None,
+            note: None,
+        };
+        let ids = ["one".to_string(), "ghost".to_string()];
+        assert!(resolve_in(&dir, &ids, &ok, "t").is_err());
+
+        let bad = Resolution {
+            outcome: "merged-it-myself",
+            reference: None,
+            note: None,
+        };
+        assert!(resolve_in(&dir, &["one".to_string()], &bad, "t").is_err());
+
+        assert_eq!(
+            fs::read_to_string(dir.join(PROCESSING_FILE)).unwrap(),
+            before
+        );
+        assert!(!dir.join(RESOLVED_FILE).exists());
     }
 
     #[test]

@@ -454,6 +454,16 @@ c0 feedback --list      # read the reports (add --json for raw JSONL)
 
 Each report is appended to `~/.c0/reflector/feedback.jsonl` under the same lock as the other queues, and carries the namespace, session, c0 version and commit, and the last walk of that session (query, entry concept, which cascade tier resolved it, and the ranked nodes). Nothing leaves your machine and nothing acts on the reports automatically; they are a queue for you to read. Tell your agent when to use it by adding a line to its instructions, e.g. *"when a c0 command returns something wrong or misleading, run `c0 feedback` with what you expected."*
 
+To work through the reports from a script or an agent, use the same claim-then-resolve shape as the dead-end inbox:
+
+```bash
+c0 feedback claim                     # move new reports into feedback.processing.jsonl, assign ids, print the batch
+c0 feedback resolve <id>... --outcome pr --ref <url> --note "<why>"
+c0 feedback --list --resolved         # what was closed, and how
+```
+
+`claim` is safe to repeat: reports you have not resolved stay claimed and are printed again, while sessions keep filing into a fresh inbox. `--outcome` is one of `pr`, `issue`, `review`, `fixed`, `duplicate`, `wontfix`, `not-reproducible`; resolved reports move to `feedback.resolved.jsonl` with the outcome attached.
+
 > Classification runs on a **local Ollama model by default** (`hermes3:8b`) — no key, no cloud, reusing the Ollama you already run for embeddings. Want Claude's higher-quality judgment instead? Point `[claude]` at the Anthropic API *or* your Claude subscription's `claude` CLI — see [Configuration](#configuration).
 
 ## Architecture notes
