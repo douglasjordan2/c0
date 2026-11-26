@@ -941,6 +941,24 @@ fn log_dead_end(command: &str, query: &str, namespace: &str, context: Option<&st
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyWalk {
+    KnowledgeGap,
+    OrphanedConcept,
+}
+
+fn classify_empty_walk(
+    resolved_via: &str,
+    patch_count: usize,
+    concept_resolved: bool,
+) -> EmptyWalk {
+    if concept_resolved || patch_count > 0 || resolved_via != "exact" {
+        EmptyWalk::OrphanedConcept
+    } else {
+        EmptyWalk::KnowledgeGap
+    }
+}
+
 fn inbox_has_dead_end(inbox: &str, query: &str, namespace: &str) -> bool {
     let wanted = query.trim().to_lowercase();
     inbox
@@ -2055,7 +2073,12 @@ async fn main() -> Result<()> {
             }
 
             if connected.is_empty() {
-                log_dead_end("walk", &start, &ctx.namespace, context.as_deref());
+                let concept_resolved =
+                    graph::concept_exists(&graph_conn, &concept, &ctx.namespaces).await?;
+                let outcome = classify_empty_walk(resolved_via, patch_count, concept_resolved);
+                if outcome == EmptyWalk::KnowledgeGap {
+                    log_dead_end("walk", &start, &ctx.namespace, context.as_deref());
+                }
                 feedback::record_walk(
                     walk_session.as_deref(),
                     &feedback::WalkRecord {
@@ -2068,6 +2091,13 @@ async fn main() -> Result<()> {
                     },
                 );
                 println!("No connections from '{concept}'");
+                if outcome == EmptyWalk::OrphanedConcept {
+                    println!(
+                        "(orphaned concept, not a knowledge gap: '{concept}' exists in {:?} but \
+                         has no edges to traverse)",
+                        ctx.namespaces
+                    );
+                }
             } else {
                 let semantic_config = config::SemanticConfig::load();
                 let mut ranked_connected: Vec<(String, f32)> = Vec::new();
@@ -3855,7 +3885,9 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{inbox_has_dead_end, should_use_semantic, truncate_display};
+    use super::{
+        EmptyWalk, classify_empty_walk, inbox_has_dead_end, should_use_semantic, truncate_display,
+    };
 
     #[test]
     fn truncate_display_returns_short_strings_unchanged() {
@@ -3885,6 +3917,41 @@ mod tests {
             let out = truncate_display(mixed, max);
             assert!(out.len() <= max.max(3), "max={max} out={out:?}");
         }
+    }
+
+    #[test]
+    fn an_unresolved_query_is_a_knowledge_gap() {
+        assert_eq!(
+            classify_empty_walk("exact", 0, false),
+            EmptyWalk::KnowledgeGap
+        );
+    }
+
+    #[test]
+    fn a_resolved_but_edgeless_concept_is_an_orphan_not_a_gap() {
+        assert_eq!(
+            classify_empty_walk("exact", 0, true),
+            EmptyWalk::OrphanedConcept
+        );
+    }
+
+    #[test]
+    fn a_fulltext_or_hybrid_match_is_never_a_gap() {
+        for via in ["fulltext", "fulltext-lowconf", "hybrid"] {
+            assert_eq!(
+                classify_empty_walk(via, 0, false),
+                EmptyWalk::OrphanedConcept,
+                "{via} matched a real node, so it cannot be a knowledge gap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_walk_that_returned_patches_is_never_a_gap() {
+        assert_eq!(
+            classify_empty_walk("exact", 2, false),
+            EmptyWalk::OrphanedConcept
+        );
     }
 
     #[test]
