@@ -44,11 +44,23 @@ impl TemporalQuery {
     }
 }
 
-fn neo4j_config() -> (String, String, String) {
+fn neo4j_config() -> Result<(String, String, String)> {
+    if let Some(target) = crate::config::project_neo4j_target() {
+        let user = target.user.clone().unwrap_or_else(|| "neo4j".to_string());
+        let password = target.password()?.unwrap_or_default();
+        return Ok((target.uri, user, password));
+    }
+    if env::var("NEO4J_URI").is_err()
+        && let Some(target) = crate::config::home_neo4j_target()
+    {
+        let user = target.user.clone().unwrap_or_else(|| "neo4j".to_string());
+        let password = target.password()?.unwrap_or_default();
+        return Ok((target.uri, user, password));
+    }
     let uri = env::var("NEO4J_URI").unwrap_or_else(|_| DEFAULT_NEO4J_URI.to_string());
     let user = env::var("NEO4J_USER").unwrap_or_default();
     let password = env::var("NEO4J_PASSWORD").unwrap_or_default();
-    (uri, user, password)
+    Ok((uri, user, password))
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +213,7 @@ pub struct EnrichmentInputs {
 }
 
 pub async fn connect() -> Result<Graph> {
-    let (uri, user, password) = neo4j_config();
+    let (uri, user, password) = neo4j_config()?;
     let graph = Graph::new(&uri, &user, &password).await?;
     Ok(graph)
 }
