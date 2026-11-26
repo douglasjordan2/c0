@@ -11,6 +11,62 @@ pub struct ProjectConfig {
     pub inherit_global: bool,
     #[serde(default)]
     pub project_type: Option<String>,
+    #[serde(default)]
+    pub neo4j: Option<Neo4jTarget>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct Neo4jTarget {
+    pub uri: String,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub password_file: Option<String>,
+}
+
+impl Neo4jTarget {
+    pub fn password(&self) -> Result<Option<String>> {
+        let Some(raw) = self.password_file.as_deref() else {
+            return Ok(None);
+        };
+        let path = match (raw.strip_prefix("~/"), dirs::home_dir()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => PathBuf::from(raw),
+        };
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("reading neo4j password_file {}: {e}", path.display()))?;
+        Ok(Some(content.trim().to_string()))
+    }
+}
+
+pub fn home_neo4j_target() -> Option<Neo4jTarget> {
+    let config_file = dirs::home_dir()?.join(".c0").join("config.toml");
+    read_config(&config_file).ok()?.neo4j
+}
+
+pub fn project_neo4j_target() -> Option<Neo4jTarget> {
+    let cwd = std::env::current_dir().ok()?;
+    project_neo4j_target_from(&cwd)
+}
+
+pub fn project_neo4j_target_from(start: &Path) -> Option<Neo4jTarget> {
+    let home = dirs::home_dir();
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if home.as_deref() == Some(d) {
+            dir = d.parent();
+            continue;
+        }
+        let config_file = d.join(".c0").join("config.toml");
+        if config_file.exists()
+            && let Ok(config) = read_config(&config_file)
+            && let Some(target) = config.neo4j
+        {
+            return Some(target);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 fn default_inherit() -> bool {
@@ -875,5 +931,55 @@ mod tests {
         assert_eq!(ctx.namespace, "global");
         // No duplicate global tail when the target already is global.
         assert_eq!(ctx.namespaces, vec!["global".to_string()]);
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("c0-neo4j-target-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_c0(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir.join(".c0")).unwrap();
+        std::fs::write(dir.join(".c0/config.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn neo4j_target_inherited_from_ancestor_past_projects_without_one() {
+        let root = scratch_dir("inherit");
+        let agency = root.join("agency");
+        let client = agency.join("client");
+        let deep = client.join("src");
+        std::fs::create_dir_all(&deep).unwrap();
+        write_c0(
+            &agency,
+            "namespace = \"global\"\n[neo4j]\nuri = \"bolt://graph-host:7687\"\nuser = \"alice\"\npassword_file = \"/nonexistent\"\n",
+        );
+        write_c0(&client, "namespace = \"client\"\n");
+        let t = project_neo4j_target_from(&deep).unwrap();
+        assert_eq!(t.uri, "bolt://graph-host:7687");
+        assert_eq!(t.user.as_deref(), Some("alice"));
+        assert!(t.password().is_err());
+        assert!(project_neo4j_target_from(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn neo4j_target_password_file_is_trimmed() {
+        let root = scratch_dir("pw");
+        let pw = root.join("pw");
+        std::fs::write(&pw, "s3cret\n").unwrap();
+        write_c0(
+            &root,
+            &format!(
+                "namespace = \"x\"\n[neo4j]\nuri = \"bolt://h:7687\"\npassword_file = \"{}\"\n",
+                pw.display()
+            ),
+        );
+        let t = project_neo4j_target_from(&root).unwrap();
+        assert_eq!(t.password().unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(t.user, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

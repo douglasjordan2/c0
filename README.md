@@ -187,6 +187,17 @@ c0 reads connection details from the environment, with a per-namespace `.c0/conf
 | `NEO4J_USER` / `NEO4J_PASSWORD` | empty | Neo4j auth |
 | `ANTHROPIC_API_KEY` | — | Optional; used only when `[claude] enabled = true`. By default, classification & extraction run on a local Ollama model — no key needed |
 
+A project can also choose its own database with a `[neo4j]` block in `.c0/config.toml`:
+
+```toml
+[neo4j]
+uri = "bolt://graph-host:7687"
+user = "neo4j"
+password_file = "~/.config/c0/graph-password"
+```
+
+The block in the current directory's config, or the nearest ancestor's, applies to every command run there and wins over `NEO4J_URI`. A block in `~/.c0/config.toml` is used only when `NEO4J_URI` is unset. `user` defaults to `neo4j`, and the password is read from `password_file` so it stays out of the config.
+
 Embedding host/model (Ollama) default to `http://localhost:11434` and `nomic-embed-text`, and are configurable.
 
 ### Walk entry confidence
